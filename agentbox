@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# agentbox: run a coding agent in an isolated container with only the current folder mounted.
+# Usage: agentbox [command...]   (default: bash)   e.g. `agentbox claude`
+set -euo pipefail
+
+engine="${AGENTBOX_ENGINE:-docker}"
+image="${AGENTBOX_IMAGE:-agent-box}"
+home_volume="${AGENTBOX_HOME_VOLUME:-agent-box-home}"
+env_file="${AGENTBOX_ENV_FILE:-$HOME/.config/agent-box/env}"
+
+# Container name from the folder name, made safe for Docker
+name="$(basename "$PWD")"
+name="${name//[^a-zA-Z0-9_.-]/-}"
+name="${name:-root}"
+
+args=(run -it --rm
+  --name "agent-box-$name"
+  --hostname "agent-box-$name"
+  -v "$home_volume:/home/agent-box"
+  -v "$PWD:/workspace/$name"
+  -w "/workspace/$name")
+
+if [[ -f "$env_file" ]]; then
+  args+=(--env-file "$env_file")
+fi
+
+# Extra engine flags, split on whitespace, e.g. AGENTBOX_OPTS="-p 3000:3000"
+if [[ -n "${AGENTBOX_OPTS:-}" ]]; then
+  read -r -a extra <<< "$AGENTBOX_OPTS"
+  args+=("${extra[@]}")
+fi
+
+if [[ $# -eq 0 ]]; then
+  set -- bash
+fi
+
+exec "$engine" "${args[@]}" "$image" "$@"
