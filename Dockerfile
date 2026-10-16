@@ -2,10 +2,10 @@
 # Works with any Docker-compatible engine: OrbStack, Docker Desktop, Podman,
 # Colima, Rancher Desktop, or Docker Engine on Linux.
 
-ARG NODE_VERSION=24
+ARG NODE_VERSION=26
 FROM node:${NODE_VERSION}-bookworm-slim AS node
 
-FROM debian:bookworm
+FROM debian:bookworm@sha256:2c037a04925515fdd6ea85ea14a682d0e79931f5e9f5d07b6dbfc6ba12f9e858
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
       git curl ca-certificates ripgrep fd-find jq less vim sudo unzip \
@@ -41,7 +41,7 @@ RUN echo 'export PATH="$HOME/.local/bin:$HOME/.opencode/bin:$PATH"' >> ~/.profil
 # Claude Code
 RUN curl -fsSL https://claude.ai/install.sh | bash
 # opencode
-RUN curl -fsSL https://opencode.ai/install | bash
+RUN curl -fsSL https://opencode.ai/v2/install | bash
 # OpenAI Codex CLI
 # RUN npm install -g @openai/codex
 # Gemini CLI

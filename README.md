@@ -62,7 +62,7 @@ Open the `Dockerfile` and find the `Coding agents` section. Uncomment the agents
 # Claude Code
 RUN curl -fsSL https://claude.ai/install.sh | bash
 # opencode
-RUN curl -fsSL https://opencode.ai/install | bash
+RUN curl -fsSL https://opencode.ai/v2/install | bash
 # OpenAI Codex CLI
 # RUN npm install -g @openai/codex
 ...
@@ -88,10 +88,10 @@ docker build --build-arg USER_UID=$(id -u) --build-arg USER_GID=$(id -g) -t agen
 
 **Podman.** Use `podman build` with the same arguments.
 
-**Node.js version.** The default is Node 24. To use a different major version, add a build arg:
+**Node.js version.** The default is Node 26. To use a different major version, add a build arg:
 
 ```bash
-docker build --build-arg NODE_VERSION=24 -t agent-box .
+docker build --build-arg NODE_VERSION=26 -t agent-box .
 ```
 
 ### 3. Install the launcher
