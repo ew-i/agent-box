@@ -1,8 +1,11 @@
 # agentbox: run a coding agent in an isolated container with only the current folder mounted.
 # Usage: agentbox [command...]   (default: bash)   e.g. `agentbox claude`
 
+# AGENTBOX_DOCKER=1: run Docker inside the sandbox (privileged, see README)
+$withDocker = $env:AGENTBOX_DOCKER -in @('1', 'true', 'yes')
+
 $engine     = if ($env:AGENTBOX_ENGINE)      { $env:AGENTBOX_ENGINE }      else { 'docker' }
-$image      = if ($env:AGENTBOX_IMAGE)       { $env:AGENTBOX_IMAGE }       else { 'agent-box' }
+$image      = if ($env:AGENTBOX_IMAGE)       { $env:AGENTBOX_IMAGE }       elseif ($withDocker) { 'agent-box:docker' } else { 'agent-box' }
 $homeVolume = if ($env:AGENTBOX_HOME_VOLUME) { $env:AGENTBOX_HOME_VOLUME } else { 'agent-box-home' }
 $envFile    = if ($env:AGENTBOX_ENV_FILE)    { $env:AGENTBOX_ENV_FILE }    else { Join-Path $HOME '.config\agent-box\env' }
 
@@ -19,6 +22,11 @@ $dockerArgs = @(
   '-v', "${project}:/workspace/$name",
   '-w', "/workspace/$name"
 )
+
+if ($withDocker) {
+  # Inner Docker's images and containers, one volume per project
+  $dockerArgs += @('--privileged', '--init', '-v', "agent-box-docker-${name}:/var/lib/docker")
+}
 
 if (Test-Path $envFile) {
   $dockerArgs += @('--env-file', $envFile)

@@ -5,6 +5,7 @@ A simple disposable, isolated Linux container for running terminal coding agents
 - The container sees **only the project folder** you start it from.
 - Agent logins, settings, history and the agents themselves live in a **named volume**, so they survive between runs.
 - The container itself is thrown away on exit (`--rm`).
+- Optional: a [Docker mode](#docker-inside-the-sandbox) gives the agent its own private Docker.
 
 It isn't tied to one tool, OS or container engine:
 
@@ -20,9 +21,10 @@ It isn't tied to one tool, OS or container engine:
 
 | File | Purpose |
 |---|---|
-| `Dockerfile` | The image: Debian + common dev tools + Node.js + the agents you choose |
+| `Dockerfile` | The image: Debian 13 + common dev tools + Node.js/npm + Python/uv + PHP/Composer + the agents you choose |
 | `agentbox` | Launcher for macOS, Linux and WSL (bash) |
 | `agentbox.ps1` | Launcher for Windows PowerShell |
+| `docker-entrypoint.sh` | Starts and stops the private Docker daemon in [Docker mode](#docker-inside-the-sandbox) |
 | `.gitattributes` | Keeps LF line endings if you check this into git on Windows |
 | `LICENSE` | MIT license |
 
@@ -34,6 +36,7 @@ It isn't tied to one tool, OS or container engine:
 |---|---|---|---|
 | `/workspace/<project>` | **Bind mount** of the folder you start from | Your code | Yes, it's your real folder |
 | `/home/agent-box` | **Named volume** `agent-box-home` | Agent binaries, logins, config, session history, npm globals, caches, git config | Yes, until you delete the volume |
+| `/var/lib/docker` (Docker mode only) | **Named volume** `agent-box-docker-<project>` | The private Docker's images, containers and volumes | Yes, until you delete the volume |
 | everything else (`/usr`, `/tmp`, apt packages, …) | The image | OS + tools from the `Dockerfile` | No, it resets every run |
 
 > **Bind mount vs named volume:** a bind mount maps a specific host folder into the container, so changes show up on both sides. A named volume is storage managed by the container engine. It doesn't appear in your normal filesystem, and the container can't use it to reach anything else.
@@ -46,7 +49,6 @@ Where common agents keep their data. All of it is under `/home/agent-box`, i.e. 
 | opencode | `~/.config/opencode/`, `~/.local/share/opencode/`, `~/.local/state/opencode/` |
 | Codex CLI | `~/.codex/` |
 | Gemini CLI | `~/.gemini/` |
-| Aider | `~/.aider*`, plus `.aider*` files **in the project folder** |
 
 Any other agent works the same way, as long as it stores its state under `$HOME`.
 
@@ -68,7 +70,7 @@ RUN curl -fsSL https://opencode.ai/v2/install | bash
 ...
 ```
 
-To add another agent, add a `RUN` line with its Linux install command. Node.js/npm and Python are already in the image. `npm install -g` installs into `~/.local`, so it works without root, and agents can update themselves later.
+To add another agent, add a `RUN` line with its Linux install command. Node.js/npm, Python and uv are already in the image. `npm install -g` and `uv tool install` both install into `~/.local`, so they work without root, and agents can update themselves later.
 
 ### 2. Build the image
 
@@ -88,10 +90,49 @@ docker build --build-arg USER_UID=$(id -u) --build-arg USER_GID=$(id -g) -t agen
 
 **Podman.** Use `podman build` with the same arguments.
 
-**Node.js version.** The default is Node 26. To use a different major version, add a build arg:
+**Language versions.** The image has three toolchains, so agents can run `npm`, `uv`, `composer` and `php artisan` in your projects. These are the defaults; override any of them with a build arg:
+
+| Build arg | Default | What you get |
+|---|---|---|
+| `NODE_VERSION` | `26` | Latest Node.js of that major version, with npm/npx, from the official `node` image |
+| `PYTHON_VERSION` | `3.14` | Latest Python of that version, installed by uv as the default `python` / `python3` |
+| `UV_VERSION` | `0.13` | Latest uv of that release line, from Astral's official image |
+| `PHP_VERSION` | `8.5` | PHP CLI from the [Sury repository](https://packages.sury.org/php/) |
+| `COMPOSER_VERSION` | `2` | Latest Composer of that major version, from the official `composer` image |
 
 ```bash
-docker build --build-arg NODE_VERSION=26 -t agent-box .
+docker build --build-arg NODE_VERSION=24 --build-arg PYTHON_VERSION=3.13 --build-arg PHP_VERSION=8.4 -t agent-box .
+```
+
+PHP comes with the extensions a typical Laravel app needs: bcmath, curl, gd, imagick, intl, mbstring, mysql (MySQL/MariaDB), readline, redis, sqlite3, xml and zip, plus the ones built into PHP (pcntl, posix, opcache, …). To add one, append its package (e.g. `php${PHP_VERSION}-pgsql`) to the PHP `apt-get install` line in the `Dockerfile`. `composer global require` installs into `~/.config/composer/vendor/bin`, which is on the `PATH`.
+
+**Xdebug (code coverage, step debugging).** Xdebug is installed but **not loaded by default**. Just loading it makes PHP about 60 % slower, even with `xdebug.mode=off` (measured on a Laravel test suite: 122 s → 195 s). That would slow down every `composer` and `artisan` call. Load it only when you need it:
+
+```bash
+with-xdebug php artisan test --coverage          # one command, coverage mode
+XDEBUG_MODE=debug with-xdebug php artisan serve  # one command, another mode
+```
+
+For a whole session (e.g. an agent that keeps running coverage), start agent-box with Xdebug loaded:
+
+```bash
+AGENTBOX_OPTS="-e PHP_INI_SCAN_DIR=:/etc/php/xdebug.d" agentbox claude
+```
+
+Python comes from uv, not from Debian, so there's no `/usr/bin/python3`. The image's Python blocks `pip install` outside a virtual environment, so inside the container use uv instead:
+
+```bash
+uv init                 # new project
+uv add requests         # add a dependency
+uv run pytest           # run in the project's venv
+uvx ruff check          # one-off tools
+uv tool install ruff    # persistent tools (into ~/.local/bin)
+```
+
+**Optional: the Docker-mode image.** Only needed if you want [Docker inside the sandbox](#docker-inside-the-sandbox). It's the same image plus Docker Engine, with the same build args:
+
+```bash
+docker build --target docker -t agent-box:docker .
 ```
 
 ### 3. Install the launcher
@@ -164,9 +205,10 @@ docker run -it --rm \
   -v agent-box-home:/home/agent-box \
   -v "<current folder>":/workspace/<project> \
   -w /workspace/<project> \
+  [--privileged --init -v agent-box-docker-<project>:/var/lib/docker]   # only with AGENTBOX_DOCKER=1
   [--env-file ~/.config/agent-box/env]   # only if the file exists
   [$AGENTBOX_OPTS]                       # your extra flags
-  agent-box [command, default: bash]
+  agent-box [command, default: bash]     # agent-box:docker with AGENTBOX_DOCKER=1
 ```
 
 Each project is mounted at its own path (`/workspace/my-app`) rather than a shared `/workspace`. That's on purpose: most agents key session history by directory, so a single shared path would mix history from different projects.
@@ -178,7 +220,8 @@ Set these as environment variables, e.g. in your shell profile:
 | Variable | Default | Use |
 |---|---|---|
 | `AGENTBOX_ENGINE` | `docker` | Set to `podman` to use Podman |
-| `AGENTBOX_IMAGE` | `agent-box` | Use a different image, e.g. a per-language variant |
+| `AGENTBOX_DOCKER` | `0` | Set to `1` for [Docker inside the sandbox](#docker-inside-the-sandbox) |
+| `AGENTBOX_IMAGE` | `agent-box` (`agent-box:docker` in Docker mode) | Use a different image, e.g. a per-language variant |
 | `AGENTBOX_HOME_VOLUME` | `agent-box-home` | Use a separate home volume, e.g. per client or per project |
 | `AGENTBOX_ENV_FILE` | `~/.config/agent-box/env` | Location of the secrets file |
 | `AGENTBOX_OPTS` | — | Extra `docker run` flags, split on spaces, e.g. `-p 3000:3000` |
@@ -201,6 +244,97 @@ Make sure the server listens on `0.0.0.0`, not `127.0.0.1`.
 
 - **OrbStack:** no port flags needed. A server on port 3000 in `agent-box-my-app` is at `http://agent-box-my-app.orb.local:3000`.
 - **Everything else:** publish the port, e.g. `AGENTBOX_OPTS="-p 3000:3000" agentbox`, then open `http://localhost:3000`.
+
+Most dev servers listen on `127.0.0.1` by default. For example:
+
+```bash
+php artisan serve --host=0.0.0.0     # Laravel, port 8000
+npm run dev -- --host 0.0.0.0        # Vite, port 5173
+```
+
+---
+
+## Databases and other services on your machine
+
+Inside the sandbox, `127.0.0.1` is the container itself. A project whose `.env` points at `127.0.0.1` for its database, Redis or mail server therefore can't reach them, e.g. a MariaDB running in another container or directly on your machine.
+
+You don't need to edit `.env`. Environment variables set on the container override the values in `.env` (Laravel, and most dotenv loaders, never overwrite a variable that's already set). Two ways to point them at the real service:
+
+**Through your machine:** works for any service that publishes its port on your machine (`-p 3306:3306`, or a local install):
+
+```bash
+AGENTBOX_OPTS="-e DB_HOST=host.docker.internal -e REDIS_HOST=host.docker.internal" agentbox claude
+```
+
+**Through the service's Docker network:** reach another compose stack's containers by name. The network name is shown by `docker ps --format '{{.Names}} {{.Networks}}'`:
+
+```bash
+AGENTBOX_OPTS="--network lamp_default -e DB_HOST=lamp-mariadb118" agentbox claude
+```
+
+`host.docker.internal` works out of the box with OrbStack and Docker Desktop. On native Linux, add `--add-host=host.docker.internal:host-gateway` to `AGENTBOX_OPTS`.
+
+To keep these settings per project, put the variables in a separate env file (one `KEY=value` per line, e.g. `DB_HOST=host.docker.internal`) and select it with `AGENTBOX_ENV_FILE`. That file replaces the default secrets file for that run.
+
+---
+
+## Docker inside the sandbox
+
+By default there's no Docker in the sandbox, so an agent can't run `docker compose up`.
+
+**Docker mode** fixes that. It gives the sandbox its own private Docker daemon, separate from the one on your machine.
+
+```bash
+docker build --target docker -t agent-box:docker .   # once
+```
+
+```bash
+cd ~/code/my-app
+AGENTBOX_DOCKER=1 agentbox claude
+```
+
+Inside the sandbox, `docker` and `docker compose` then work as on a normal machine:
+
+```bash
+docker compose up -d
+curl http://localhost:9000/api/system   # published ports are on localhost inside the sandbox
+docker compose down
+```
+
+### Ports
+
+| From | How to reach a published port, e.g. `9000` |
+|---|---|
+| Inside the sandbox (agent, tests) | `http://localhost:9000` |
+| Your machine, with OrbStack | `http://agent-box-my-app.orb.local:9000`, no extra flags |
+| Your machine, other engines | Publish it on the sandbox as well: `AGENTBOX_DOCKER=1 AGENTBOX_OPTS="-p 9000:9000" agentbox` |
+
+### Lifetime
+
+- The stack runs as long as the sandbox does. When you leave the sandbox, the entrypoint stops the private daemon, which shuts the containers down cleanly.
+- Images and named compose volumes stay in `agent-box-docker-<project>` for next time.
+- Run `docker compose down -v` inside the sandbox for a fresh state.
+- A second shell (`docker exec -it agent-box-my-app bash`) uses the same private daemon.
+
+### Security trade-off
+
+`--privileged` removes most of the walls between the container and the machine running it. Docker mode is therefore **much less isolated** than the default:
+
+- **macOS / Windows:** containers run in the engine's Linux VM. A privileged container could break out into that VM, and the VM can usually see your files (OrbStack and Docker Desktop share your home folder with it). An agent won't do this by accident, but a malicious prompt or dependency could.
+- **Native Linux:** there's no VM in between. A privileged container is close to root on your actual machine.
+- **Rootless Podman:** running a Docker daemon inside usually doesn't work there. This setup hasn't been tested with it.
+
+Use Docker mode only for projects where you need it. Keep the default mode for everything else. If the agent only needs to *call* the stack and not start or stop it, a safer option is to start the stack yourself on your machine and attach the sandbox to its network:
+
+```bash
+docker compose up -d
+```
+
+```bash
+AGENTBOX_OPTS="--network my-app_default" agentbox claude
+```
+
+The agent then reaches the stack by service name, e.g. `http://graylog:9000`.
 
 ---
 
@@ -298,9 +432,16 @@ Use `:ro` for anything the agents should read but never change.
 
 ```bash
 docker build -t agent-box .
+docker build --target docker -t agent-box:docker .   # if you use Docker mode
 ```
 
-> **Important:** `/home/agent-box` comes from the **volume**, which was filled from the image only on its first use. System packages (`apt`, Node.js) update with every rebuild. But an agent you **add** to the Dockerfile later is installed into `/home/agent-box` in the image, so it won't appear in an existing volume.
+To pick up the newest Node.js, Python, uv, PHP and Composer releases without changing the Dockerfile, add `--pull --no-cache`. Otherwise Docker reuses the cached base images and layers:
+
+```bash
+docker build --pull --no-cache -t agent-box .
+```
+
+> **Important:** `/home/agent-box` comes from the **volume**, which was filled from the image only on its first use. System packages (`apt`, Node.js, Python, uv, PHP, Composer) update with every rebuild. But an agent you **add** to the Dockerfile later is installed into `/home/agent-box` in the image, so it won't appear in an existing volume.
 >
 > To get it, either install it once inside a running container (same command as in the Dockerfile), or reset the volume (see below) and log in again.
 
@@ -316,13 +457,13 @@ docker volume inspect agent-box-home   # details
 **Back it up** (run in the folder where the backup should go; in PowerShell use `${PWD}`):
 
 ```bash
-docker run --rm -v agent-box-home:/data -v "$PWD":/backup debian:bookworm tar czf /backup/agent-box-home.tgz -C /data .
+docker run --rm -v agent-box-home:/data -v "$PWD":/backup debian:trixie tar czf /backup/agent-box-home.tgz -C /data .
 ```
 
 **Restore:**
 
 ```bash
-docker run --rm -v agent-box-home:/data -v "$PWD":/backup debian:bookworm tar xzf /backup/agent-box-home.tgz -C /data
+docker run --rm -v agent-box-home:/data -v "$PWD":/backup debian:trixie tar xzf /backup/agent-box-home.tgz -C /data
 ```
 
 **Reset it** (refills from the image on the next run; you'll have to log in again):
@@ -335,6 +476,13 @@ docker volume rm agent-box-home
 
 ```bash
 docker volume ls -q | grep '^agent-box-nm-' | xargs docker volume rm
+```
+
+**Remove Docker-mode volumes** (cached images and stack data). They can get large:
+
+```bash
+docker system df -v | grep agent-box-docker-                              # see sizes
+docker volume ls -q | grep '^agent-box-docker-' | xargs docker volume rm  # remove all
 ```
 
 ---
@@ -354,6 +502,7 @@ docker volume ls -q | grep '^agent-box-nm-' | xargs docker volume rm
 - **The network.** The container has full outbound internet access and can reach services on your LAN. It can usually also reach services on your host, via `host.docker.internal` or `host.orb.internal`.
 - **Anything you pass in** via the env file or extra mounts.
 - **The shared `agent-box-home` volume.** It's shared across projects, so one project's session can read another project's agent history.
+- **Docker mode.** With `AGENTBOX_DOCKER=1` the container is privileged, so most of the protection above no longer holds. See [Security trade-off](#security-trade-off).
 
 If you want a stricter setup, use a separate home volume per project or client, e.g. `AGENTBOX_HOME_VOLUME=agent-box-home-clientA`. The trade-off is that you'll have to log in once per volume.
 
@@ -371,4 +520,8 @@ If you want a stricter setup, use a separate home volume per project or client, 
 | `bash\r: No such file or directory` | CRLF line endings. Convert `agentbox` and `Dockerfile` to LF. |
 | Login URL won't complete | Copy the full URL into your host browser, then paste the code it shows back into the container's terminal. Or use API keys in the env file. |
 | Dev server not reachable | It must listen on `0.0.0.0`. Outside OrbStack, also publish the port with `-p`. |
+| `agent-box: the Docker daemon didn't start` | The container isn't privileged. Start it with `AGENTBOX_DOCKER=1 agentbox` rather than `docker run agent-box:docker` directly. Details are in `/tmp/dockerd.log` inside the sandbox. |
+| `docker: command not found` in Docker mode | The `agent-box:docker` image is missing or outdated. Run `docker build --target docker -t agent-box:docker .` |
+| Inner stack not reachable from your machine | Inside the sandbox use `localhost`. From your machine, use `agent-box-<project>.orb.local` (OrbStack), or publish the port with `AGENTBOX_OPTS="-p 9000:9000"`. |
+| `Code coverage driver not available. Did you install Xdebug or PCOV?` | Xdebug isn't loaded by default. Run `with-xdebug php artisan test --coverage`, or see [Xdebug](#2-build-the-image) for a whole session. |
 | Two projects with the same folder name | They'd get the same container name and history path. Rename one folder. |

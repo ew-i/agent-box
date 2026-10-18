@@ -4,9 +4,20 @@
 set -euo pipefail
 
 engine="${AGENTBOX_ENGINE:-docker}"
-image="${AGENTBOX_IMAGE:-agent-box}"
 home_volume="${AGENTBOX_HOME_VOLUME:-agent-box-home}"
 env_file="${AGENTBOX_ENV_FILE:-$HOME/.config/agent-box/env}"
+
+# AGENTBOX_DOCKER=1: run Docker inside the sandbox (privileged, see README)
+case "${AGENTBOX_DOCKER:-0}" in
+  1|true|yes) with_docker=1 ;;
+  *)          with_docker=0 ;;
+esac
+
+if [[ $with_docker -eq 1 ]]; then
+  image="${AGENTBOX_IMAGE:-agent-box:docker}"
+else
+  image="${AGENTBOX_IMAGE:-agent-box}"
+fi
 
 # Container name from the folder name, made safe for Docker
 name="$(basename "$PWD")"
@@ -19,6 +30,11 @@ args=(run -it --rm
   -v "$home_volume:/home/agent-box"
   -v "$PWD:/workspace/$name"
   -w "/workspace/$name")
+
+if [[ $with_docker -eq 1 ]]; then
+  # Inner Docker's images and containers, one volume per project
+  args+=(--privileged --init -v "agent-box-docker-$name:/var/lib/docker")
+fi
 
 if [[ -f "$env_file" ]]; then
   args+=(--env-file "$env_file")
