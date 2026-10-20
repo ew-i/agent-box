@@ -1,0 +1,6 @@
+# MISE_ENV=java: JDK, the two common build tools, and jbang for single-file scripts
+[tools]
+java = "temurin-27.0.0+35"
+maven = "3.10.0"
+gradle = "9.8.1"
+jbang = "0.142.0"

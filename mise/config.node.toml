@@ -1,0 +1,6 @@
+# MISE_ENV=node: package managers (Node.js itself is always on, see config.toml).
+# Node 25+ no longer ships corepack, so add it back: its yarn and pnpm follow
+# the project's "packageManager" pin (yarn 1 vs 4); a standalone yarn 4 ignores it.
+[tools]
+"npm:corepack" = "0.36.0"
+bun = "1.4.3"

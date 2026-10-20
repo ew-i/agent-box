@@ -44,8 +44,26 @@ if ! docker info >/dev/null 2>&1; then
   start_dockerd && started=1
 fi
 
-status=0
-"$@" || status=$?
+# docker stop (TERM) and a closed terminal (HUP) only reach this script, and the
+# container dies with it. A trap only fires while bash waits in `wait`, not while
+# a foreground command runs, so the command runs in the background (<&0 keeps the tty;
+# env restores Ctrl-C and Ctrl-\, which bash makes background jobs ignore).
+on_signal() {
+  kill -HUP "$child" 2>/dev/null   # HUP, not TERM: an interactive bash ignores TERM
+  [[ $started -eq 1 ]] && stop_dockerd
+  exit $((128 + $1))
+}
+trap 'on_signal 1' HUP
+trap 'on_signal 15' TERM
+trap : INT   # Ctrl-C is for the command; a handler (unlike ignoring) isn't inherited by it
+
+env --default-signal=INT,QUIT "$@" <&0 &
+child=$!
+while kill -0 "$child" 2>/dev/null; do
+  wait "$child"
+done
+wait "$child"
+status=$?
 
 if [[ $started -eq 1 ]]; then
   stop_dockerd

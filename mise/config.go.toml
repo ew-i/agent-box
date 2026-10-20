@@ -1,0 +1,4 @@
+# MISE_ENV=go: Go toolchain plus the de-facto linter
+[tools]
+go = "1.27.2"
+golangci-lint = "2.15.0"

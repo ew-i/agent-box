@@ -1,0 +1,4 @@
+# Always on: Node.js, since many agents ship via npm, and the GitHub CLI
+[tools]
+node = "26.12.0"
+gh = "2.102.0"
