@@ -1,0 +1,50 @@
+# Scan the full image (PHP + Docker inside) with Trivy. It contains every other
+# target, so one scan covers them all. Fails only on HIGH/CRITICAL findings that
+# already have a fix: everything pinned in the Dockerfile stays put, so a red
+# weekly run means "a fix is out, bump the pins". Accepted findings go in
+# .trivyignore.yaml with a reason and an expiry date.
+name: trivy
+
+on:
+  push:
+    branches: [main]
+    paths: [Dockerfile, mise/**, '*.sh', .trivyignore.yaml, .github/workflows/trivy.yml]
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Build agent-box:php-docker
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          target: docker
+          build-args: DOCKER_BASE=php
+          tags: agent-box:php-docker
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Scan for fixable HIGH/CRITICAL vulnerabilities and secrets
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        env:
+          # skip the summary table: it lists every package.json in npm, all with 0
+          TRIVY_TABLE_MODE: detailed
+        with:
+          version: v0.76.1
+          image-ref: agent-box:php-docker
+          scanners: vuln,secret
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          trivyignores: .trivyignore.yaml
+          exit-code: '1'

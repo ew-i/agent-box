@@ -8,7 +8,7 @@ ARG DOCKER_BASE=base
 FROM composer:${COMPOSER_VERSION} AS composer
 FROM jdxcode/mise:${MISE_VERSION} AS mise
 
-FROM debian:trixie@sha256:913f6706df59a68922d1dd08f78c2476560a8d367897200a6005b00e5f67c2d5 AS base
+FROM debian:trixie@sha256:4c25275446ca371766b8b093c696782eabce06263fccacb8d5d813b3dc44b308 AS base
 
 # apt packages are pinned to exact versions. Debian's mirrors drop old versions
 # with every update, so apt reads from the snapshot.debian.org date the base
@@ -18,7 +18,7 @@ RUN sed -i -E 's|^# (http://snapshot\.debian\.org/.+)$|URIs: \1\nCheck-Valid-Unt
       /etc/apt/sources.list.d/debian.sources \
  && grep -q '^URIs: http://snapshot' /etc/apt/sources.list.d/debian.sources \
  && apt-get update && apt-get install -y --no-install-recommends \
-      git=1:2.47.3-0+deb13u1 curl=8.14.1-2+deb13u5 ca-certificates=20250419 \
+      git=1:2.47.3-0+deb13u1 curl=8.14.1-2+deb13u7 ca-certificates=20250419+deb13u1 \
       ripgrep=14.1.1-1+b4 fd-find=10.2.0-1+b5 jq=1.7.1-6+deb13u4 less=668-1 \
       vim=2:9.1.1230-2 sudo=1.9.16p2-3+deb13u2 unzip=6.0-29+deb13u1 procps=2:4.0.4-9 \
       rsync=3.5.0+ds1-0+deb13u1 build-essential=12.12 \
@@ -129,8 +129,8 @@ RUN install -m 0755 -d /etc/apt/keyrings \
  && echo "deb [signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian trixie stable" \
       > /etc/apt/sources.list.d/docker.list \
  && apt-get update && apt-get install -y --no-install-recommends \
-      docker-ce=5:29.9.1-1~debian.13~trixie docker-ce-cli=5:29.9.1-1~debian.13~trixie \
-      containerd.io=2.4.2-2~debian.13~trixie docker-compose-plugin=5.6.0-1~debian.13~trixie \
+      docker-ce=5:29.9.2-1~debian.13~trixie docker-ce-cli=5:29.9.2-1~debian.13~trixie \
+      containerd.io=2.4.2-3~debian.13~trixie docker-compose-plugin=5.6.1-1~debian.13~trixie \
       iptables=1.8.11-2 \
  && rm -rf /var/lib/apt/lists/* \
  && usermod -aG docker agent-box

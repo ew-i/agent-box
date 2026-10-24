@@ -1,0 +1,16 @@
+# Keeps the SHA-pinned GitHub Actions current: Dependabot bumps both the SHA
+# and the "# vX.Y.Z" comment. All action bumps land in one weekly PR, and a
+# release must be 7 days old first, so a hijacked tag has time to be caught.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: "chore(dep)"
