@@ -87,21 +87,19 @@ CMD ["bash"]
 FROM base AS php
 USER root
 ARG PHP_VERSION=8.5
-# Pinned like the base packages, but Sury has no snapshot and keeps only the
-# newest builds: when it publishes a new one this fails, so bump the versions
-# (and change them whenever you change PHP_VERSION).
+# Only the PHP minor (PHP_VERSION) is pinned, not exact package versions like
+# the base packages: Sury has no snapshot, keeps only the newest builds, and
+# publishes amd64 and arm64 days apart, so an exact pin breaks the build on one
+# architecture or the other with every PHP release. You get Sury's newest build.
 RUN curl -fsSLo /tmp/debsuryorg-archive-keyring.deb https://packages.sury.org/debsuryorg-archive-keyring.deb \
  && dpkg -i /tmp/debsuryorg-archive-keyring.deb && rm /tmp/debsuryorg-archive-keyring.deb \
  && echo "deb [signed-by=/usr/share/keyrings/debsuryorg-archive-keyring.gpg] https://packages.sury.org/php/ trixie main" \
       > /etc/apt/sources.list.d/php.list \
- && v=8.5.11-1+0~20260924.26+debian13~1.gbpbcb504 \
  && apt-get update && apt-get install -y --no-install-recommends \
-      php${PHP_VERSION}-cli=$v php${PHP_VERSION}-bcmath=$v php${PHP_VERSION}-curl=$v php${PHP_VERSION}-gd=$v \
-      php${PHP_VERSION}-intl=$v php${PHP_VERSION}-mbstring=$v php${PHP_VERSION}-mysql=$v \
-      php${PHP_VERSION}-readline=$v php${PHP_VERSION}-sqlite3=$v php${PHP_VERSION}-xml=$v php${PHP_VERSION}-zip=$v \
-      php${PHP_VERSION}-imagick=3.8.1-1+0~20260621.55+debian13~1.gbpde1d95 \
-      php${PHP_VERSION}-redis=6.3.0-2+0~20260711.69+debian13~1.gbpd148c3 \
-      php${PHP_VERSION}-xdebug=3.5.3-1+0~20260620.69+debian13~1.gbp8ad7a9 \
+      php${PHP_VERSION}-cli php${PHP_VERSION}-bcmath php${PHP_VERSION}-curl php${PHP_VERSION}-gd \
+      php${PHP_VERSION}-intl php${PHP_VERSION}-mbstring php${PHP_VERSION}-mysql \
+      php${PHP_VERSION}-readline php${PHP_VERSION}-sqlite3 php${PHP_VERSION}-xml php${PHP_VERSION}-zip \
+      php${PHP_VERSION}-imagick php${PHP_VERSION}-redis php${PHP_VERSION}-xdebug \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=composer /usr/bin/composer /usr/local/bin/composer
 

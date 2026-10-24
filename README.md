@@ -166,7 +166,7 @@ agentbox --php claude
 
 Presets work in it too, e.g. `agentbox --php -p node`.
 
-PHP comes with the extensions a typical Laravel app needs: bcmath, curl, gd, imagick, intl, mbstring, mysql (MySQL/MariaDB), readline, redis, sqlite3, xml and zip, plus the ones built into PHP (pcntl, posix, opcache, …). To add one, append its package with the pinned version (e.g. `php${PHP_VERSION}-pgsql=$v`) to the PHP `apt-get install` line in the `Dockerfile`. `composer global require` installs into `~/.config/composer/vendor/bin`, which is on the `PATH`.
+PHP comes with the extensions a typical Laravel app needs: bcmath, curl, gd, imagick, intl, mbstring, mysql (MySQL/MariaDB), readline, redis, sqlite3, xml and zip, plus the ones built into PHP (pcntl, posix, opcache, …). To add one, append its package (e.g. `php${PHP_VERSION}-pgsql`) to the PHP `apt-get install` line in the `Dockerfile`. `composer global require` installs into `~/.config/composer/vendor/bin`, which is on the `PATH`.
 
 **Xdebug (code coverage, step debugging).** Xdebug is installed but **not loaded by default**. Just loading it makes PHP about 60 % slower, even with `xdebug.mode=off` (measured on a Laravel test suite: 122 s → 195 s). That would slow down every `composer` and `artisan` call. Load it only when you need it:
 
@@ -493,7 +493,7 @@ docker build --target docker -t agent-box:docker .   # if you use Docker mode
 
 **Toolchains from presets** are pinned to exact versions. To update, raise the versions in `mise/*.toml` and rebuild the image; the new versions install on the next start. `mise outdated --bump` inside the container lists what's newer, and `mise prune` removes old versions from the volume.
 
-**apt packages** are pinned to exact versions in the `Dockerfile`. Debian packages come from the [snapshot.debian.org](https://snapshot.debian.org) date that the pinned `debian:trixie` image names, so they build the same every time. To update, bump the image digest, then read the new versions inside a container (`apt-cache policy <package>`) and put them in the pins. PHP (Sury) has no snapshot and only keeps its newest builds, so the PHP image fails to build once Sury publishes a new one. Read the new versions the same way and bump them.
+**apt packages** are pinned to exact versions in the `Dockerfile`. Debian packages come from the [snapshot.debian.org](https://snapshot.debian.org) date that the pinned `debian:trixie` image names, so they build the same every time. To update, bump the image digest, then read the new versions inside a container (`apt-cache policy <package>`) and put them in the pins. PHP (Sury) is the exception: it has no snapshot, keeps only its newest builds and publishes amd64 and arm64 days apart, so only the PHP minor (`PHP_VERSION`) is pinned and each build gets Sury's newest packages. Rebuild the PHP image to pick up a new PHP patch release.
 
 To pick up the newest mise and Composer releases without changing the Dockerfile, add `--pull --no-cache`. Otherwise Docker reuses the cached base images and layers:
 
