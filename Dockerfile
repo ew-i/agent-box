@@ -62,8 +62,8 @@ RUN mise install
 # ---- Coding agents: keep the ones you want, comment out the rest ----
 
 # Pinned versions; both self-update at runtime into the home volume.
-ARG CLAUDE_CODE_VERSION=2.1.303
-ARG OPENCODE_VERSION=2.0.32
+ARG CLAUDE_CODE_VERSION=2.1.306
+ARG OPENCODE_VERSION=2.1.2
 ARG CODEX_VERSION=0.163.0
 ARG GEMINI_CLI_VERSION=0.64.0
 # Claude Code
