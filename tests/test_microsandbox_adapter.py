@@ -7,7 +7,7 @@ from microsandbox import Action, MountKind, Network, Protocol, Rule, VolumeKind
 
 from agentbox.config import AgentProfile, HostSecret, NetworkMode, WorkspaceMount
 from agentbox.errors import SandboxStartupError
-from agentbox.microsandbox_adapter import DIRECTORY_MODE, HTTPS_PORT, to_sandbox_kwargs
+from agentbox.microsandbox_adapter import _EGRESS, DIRECTORY_MODE, HTTPS_PORT, to_sandbox_kwargs
 from agentbox.profiles import BUILTIN_PROFILES
 
 DNS_PORT = 53
@@ -366,3 +366,8 @@ def test_given_a_builtin_profile_when_translating_then_allowlists_its_own_domain
 
 def test_given_the_airgapped_profile_when_translating_then_has_no_rules() -> None:
     assert network_of(BUILTIN_PROFILES["airgapped"]).policy.rules == ()
+
+
+def test_every_mode_with_egress_has_a_policy() -> None:
+    """A new NetworkMode without an entry would fail at boot, not here."""
+    assert set(_EGRESS) == set(NetworkMode) - {NetworkMode.OFFLINE}

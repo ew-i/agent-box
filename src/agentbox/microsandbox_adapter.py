@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from dataclasses import dataclass
 from fnmatch import fnmatch
 from typing import TYPE_CHECKING, Any
 
@@ -40,7 +41,7 @@ from agentbox.config import NetworkMode
 from agentbox.errors import SandboxStartupError
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
 
     from agentbox.config import AgentProfile, WorkspaceMount
 
@@ -151,46 +152,65 @@ def _build_network(profile: AgentProfile) -> Network:
             f"secret hosts {', '.join(bypassed)} are in tls_bypass, so they would never get "
             "the real value; remove them there"
         )
+    egress = _EGRESS[profile.network](profile, secret_hosts)
     # A secret turns on interception; configuring TLS without one would turn it on for nothing.
-    tls = TlsConfig(bypass=profile.tls_bypass) if secret_hosts else None
-    match profile.network:
-        case NetworkMode.UNRESTRICTED:
-            return Network(policy=NetworkPolicy.allow_all(), dns=_PRIVATE_DNS, tls=tls)
-        case NetworkMode.CORPORATE:
-            return Network(
-                policy=NetworkPolicy(
-                    default_egress=Action.DENY,
-                    default_ingress=Action.DENY,
-                    rules=_corporate_rules(),
-                ),
-                dns=_PRIVATE_DNS,
-                tls=tls,
-            )
-        case NetworkMode.PUBLIC:
-            return Network(policy=NetworkPolicy.from_profiles([NetworkProfile.PUBLIC]), tls=tls)
-        case _:  # NetworkMode.ALLOWLIST
-            patterns = _domain_patterns(profile.allowed_domains)
-            if blocked := [h for h in secret_hosts if not any(_covers(p, h) for p in patterns)]:
-                raise SandboxStartupError(
-                    f"secret hosts {', '.join(blocked)} are not in allowed_domains, so every "
-                    "request to them would be blocked; add them there"
-                )
-            if tls is not None:
-                tls = TlsConfig(bypass=(*_tls_bypass(patterns, secret_hosts), *profile.tls_bypass))
-            # strict=True only lets a domain rule match traffic microsandbox decrypts; without
-            # that every allowed domain is blocked. Decrypting all of them breaks clients that
-            # don't trust its CA, like containers inside Docker. Non-strict matching still ties
-            # the TLS hostname to an IP the guest resolved through an allowed domain.
-            return Network(
-                policy=NetworkPolicy(
-                    default_egress=Action.DENY,
-                    default_ingress=Action.DENY,
-                    rules=_allowlist_rules(profile.allowed_domains),
-                ),
-                strict=False,
-                dns=_PRIVATE_DNS if profile.allow_private_dns else None,
-                tls=tls,
-            )
+    tls = TlsConfig(bypass=(*egress.tls_bypass, *profile.tls_bypass)) if secret_hosts else None
+    return Network(policy=egress.policy, strict=egress.strict, dns=egress.dns, tls=tls)
+
+
+@dataclass(frozen=True)
+class _Egress:
+    """What sets one network mode apart; everything shared is built in :func:`_build_network`."""
+
+    policy: NetworkPolicy
+    dns: DnsConfig | None = None
+    strict: bool = True
+    tls_bypass: tuple[str, ...] = ()
+    """Bypassed on top of the profile's ``tls_bypass``."""
+
+
+def _unrestricted(_profile: AgentProfile, _secret_hosts: Sequence[str]) -> _Egress:
+    return _Egress(NetworkPolicy.allow_all(), dns=_PRIVATE_DNS)
+
+
+def _corporate(_profile: AgentProfile, _secret_hosts: Sequence[str]) -> _Egress:
+    return _Egress(_deny_by_default(_corporate_rules()), dns=_PRIVATE_DNS)
+
+
+def _public(_profile: AgentProfile, _secret_hosts: Sequence[str]) -> _Egress:
+    return _Egress(NetworkPolicy.from_profiles([NetworkProfile.PUBLIC]))
+
+
+def _allowlist(profile: AgentProfile, secret_hosts: Sequence[str]) -> _Egress:
+    patterns = _domain_patterns(profile.allowed_domains)
+    if blocked := [h for h in secret_hosts if not any(_covers(p, h) for p in patterns)]:
+        raise SandboxStartupError(
+            f"secret hosts {', '.join(blocked)} are not in allowed_domains, so every "
+            "request to them would be blocked; add them there"
+        )
+    # strict=True only lets a domain rule match traffic microsandbox decrypts; without
+    # that every allowed domain is blocked. Decrypting all of them breaks clients that
+    # don't trust its CA, like containers inside Docker. Non-strict matching still ties
+    # the TLS hostname to an IP the guest resolved through an allowed domain.
+    return _Egress(
+        _deny_by_default(_allowlist_rules(profile.allowed_domains)),
+        dns=_PRIVATE_DNS if profile.allow_private_dns else None,
+        strict=False,
+        tls_bypass=_tls_bypass(patterns, secret_hosts),
+    )
+
+
+_EGRESS: dict[NetworkMode, Callable[[AgentProfile, Sequence[str]], _Egress]] = {
+    NetworkMode.UNRESTRICTED: _unrestricted,
+    NetworkMode.CORPORATE: _corporate,
+    NetworkMode.PUBLIC: _public,
+    NetworkMode.ALLOWLIST: _allowlist,
+}
+"""Every mode that has egress; ``offline`` has none, see :func:`_build_network`."""
+
+
+def _deny_by_default(rules: tuple[Rule, ...]) -> NetworkPolicy:
+    return NetworkPolicy(default_egress=Action.DENY, default_ingress=Action.DENY, rules=rules)
 
 
 def _corporate_rules() -> tuple[Rule, ...]:

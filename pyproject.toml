@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agentbox"
-version = "0.1.1"
+version = "0.1.2"
 description = "Sandboxed execution environments for coding agents, backed by microsandbox microVMs."
 readme = "README.md"
 requires-python = ">=3.11"
