@@ -5,13 +5,13 @@ NAME ?= dev
 # host. READONLY=1 mounts it read-only, which even root in the box can't undo.
 WORKSPACE ?= $(error set WORKSPACE, e.g. make start WORKSPACE=~/code/my-app)
 READONLY ?=
+# Optional: loaded when it exists, e.g. one line OPENROUTER_API_KEY=sk-or-... (chmod 600 it).
 ENV_FILE ?= $(HOME)/.config/agentbox/.env
 
 .PHONY: start exec stop del
 
 start:
-	@test -f $(ENV_FILE) || { echo "missing $(ENV_FILE): create it with one line, OPENROUTER_API_KEY=sk-or-..., then chmod 600 it" >&2; exit 1; }
-	uv run --env-file $(ENV_FILE) agentbox up dev --name $(NAME) -w $(WORKSPACE) $(if $(READONLY),--readonly)
+	uv run $(if $(wildcard $(ENV_FILE)),--env-file $(ENV_FILE)) agentbox up dev --name $(NAME) -w $(WORKSPACE) $(if $(READONLY),--readonly)
 exec:
 	uv run msb exec $(NAME) -- /bin/bash
 stop:
