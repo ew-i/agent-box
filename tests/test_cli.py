@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, BinaryIO
 
+import click
 import pytest
 from typer.testing import CliRunner
 
@@ -249,7 +250,7 @@ def test_given_no_workspace_when_running_readonly_then_refuses(recorder: Recorde
     result = runner.invoke(main, ["run", "airgapped", "ls", "--readonly"])
 
     assert result.exit_code == 2
-    assert "nothing to mount read-only" in " ".join(result.output.replace("│", " ").split())
+    assert "nothing to mount read-only" in " ".join(click.unstyle(result.output).replace("│", " ").split())
     assert recorder.profiles == []
 
 
@@ -257,7 +258,7 @@ def test_given_the_home_folder_when_running_then_refuses_to_mount_it(recorder: R
     result = runner.invoke(main, ["run", "airgapped", "ls", "--workspace", str(Path.home())])
 
     assert result.exit_code == 2
-    assert "contains your home folder" in " ".join(result.output.replace("│", " ").split())
+    assert "contains your home folder" in " ".join(click.unstyle(result.output).replace("│", " ").split())
     assert recorder.profiles == []
 
 
