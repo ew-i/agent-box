@@ -176,6 +176,52 @@ def test_given_unrestricted_when_translating_then_allows_all_traffic(profile: Ag
     assert policy.default_egress is Action.ALLOW
 
 
+def test_given_unrestricted_when_translating_then_resolves_names_to_private_ips(profile: AgentProfile) -> None:
+    """Rebind protection would drop the answer for a host on a corporate network or VPN."""
+    network = network_of(profile.model_copy(update={"network": NetworkMode.UNRESTRICTED}))
+
+    assert network.dns.rebind_protection is False
+
+
+def test_given_corporate_when_translating_then_allows_public_and_private_networks(profile: AgentProfile) -> None:
+    network = network_of(profile.model_copy(update={"network": NetworkMode.CORPORATE}))
+
+    assert network.policy.default_egress is Action.DENY
+    assert {("group", "public"), ("group", "private")} <= destinations(network.policy.rules, Action.ALLOW)
+    assert network.dns.rebind_protection is False
+
+
+def test_given_corporate_when_translating_then_keeps_the_host_and_metadata_out_of_reach(profile: AgentProfile) -> None:
+    """The first matching rule wins, so the metadata deny must come before the private allow.
+    The host is only reachable for DNS, through the gateway on port 53."""
+    rules = network_of(profile.model_copy(update={"network": NetworkMode.CORPORATE})).policy.rules
+
+    assert rules[0].action is Action.DENY
+    assert (rules[0].destination.kind.value, rules[0].destination.value) == ("group", METADATA)
+    assert {rule.port for rule in rules if rule.destination.value == "host"} == {DNS_PORT}
+
+
+@pytest.mark.parametrize("mode", [NetworkMode.ALLOWLIST, NetworkMode.PUBLIC])
+def test_given_a_restricted_mode_when_translating_then_keeps_rebind_protection(profile: AgentProfile, mode: NetworkMode) -> None:
+    network = network_of(profile.model_copy(update={"network": mode}))
+
+    assert network.dns is None or network.dns.rebind_protection is True
+
+
+def test_given_allow_private_dns_when_translating_then_lets_allowed_domains_resolve_to_private_ips(profile: AgentProfile) -> None:
+    """Intranet hosts behind a VPN resolve to private IPs, which rebind protection would drop."""
+    network = network_of(profile.model_copy(update={"allowed_domains": (".corp.com",), "allow_private_dns": True}))
+
+    assert network.dns.rebind_protection is False
+    assert network.policy.default_egress is Action.DENY
+
+
+def test_given_allow_private_dns_when_labelling_then_a_restart_notices_the_change(profile: AgentProfile) -> None:
+    private = profile.model_copy(update={"allow_private_dns": True})
+
+    assert to_sandbox_kwargs(private)["labels"]["agentbox.network"] != to_sandbox_kwargs(profile)["labels"]["agentbox.network"]
+
+
 def test_given_allowlist_when_translating_then_matches_domains_without_decrypting_traffic(profile: AgentProfile) -> None:
     """Strict matching without interception blocks every allowed domain, checked on a real microVM."""
     network = network_of(profile)
@@ -226,7 +272,7 @@ def test_given_a_secret_host_outside_allowed_domains_when_translating_then_refus
         to_sandbox_kwargs(with_secret)
 
 
-@pytest.mark.parametrize("mode", [NetworkMode.PUBLIC, NetworkMode.UNRESTRICTED])
+@pytest.mark.parametrize("mode", [NetworkMode.PUBLIC, NetworkMode.CORPORATE, NetworkMode.UNRESTRICTED])
 def test_given_a_secret_outside_allowlist_mode_when_translating_then_bypasses_only_tls_bypass(profile: AgentProfile, monkeypatch: pytest.MonkeyPatch, mode: NetworkMode) -> None:
     """No allowlist to derive exemptions from, so every site not in tls_bypass is decrypted."""
     monkeypatch.setenv("KEY", "v")

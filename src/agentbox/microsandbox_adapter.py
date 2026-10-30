@@ -34,6 +34,7 @@ from microsandbox import (
     Volume,
     VolumeKind,
 )
+from microsandbox.types import DnsConfig
 
 from agentbox.config import NetworkMode
 from agentbox.errors import SandboxStartupError
@@ -51,6 +52,10 @@ DIRECTORY_MODE = 0o755
 
 _DIGEST_LENGTH = 12
 """Hex characters of the network-settings hash kept in a label; enough to tell edits apart."""
+
+_PRIVATE_DNS = DnsConfig(rebind_protection=False)
+"""Rebind protection drops DNS answers with private IPs, so names on a corporate network or
+VPN would not resolve even where the policy lets the traffic through."""
 
 
 def to_sandbox_kwargs(profile: AgentProfile) -> dict[str, Any]:
@@ -103,7 +108,14 @@ def _labels(profile: AgentProfile) -> dict[str, str]:
     # named_volumes too: a separate home is how an untrusted project avoids the shared one.
     network = profile.model_dump(
         mode="json",
-        include={"network", "allowed_domains", "tls_bypass", "secrets", "named_volumes"},
+        include={
+            "network",
+            "allowed_domains",
+            "allow_private_dns",
+            "tls_bypass",
+            "secrets",
+            "named_volumes",
+        },
     )
     digest = hashlib.sha256(json.dumps(network, sort_keys=True).encode()).hexdigest()
     labels = {
@@ -143,7 +155,17 @@ def _build_network(profile: AgentProfile) -> Network:
     tls = TlsConfig(bypass=profile.tls_bypass) if secret_hosts else None
     match profile.network:
         case NetworkMode.UNRESTRICTED:
-            return Network(policy=NetworkPolicy.allow_all(), tls=tls)
+            return Network(policy=NetworkPolicy.allow_all(), dns=_PRIVATE_DNS, tls=tls)
+        case NetworkMode.CORPORATE:
+            return Network(
+                policy=NetworkPolicy(
+                    default_egress=Action.DENY,
+                    default_ingress=Action.DENY,
+                    rules=_corporate_rules(),
+                ),
+                dns=_PRIVATE_DNS,
+                tls=tls,
+            )
         case NetworkMode.PUBLIC:
             return Network(policy=NetworkPolicy.from_profiles([NetworkProfile.PUBLIC]), tls=tls)
         case _:  # NetworkMode.ALLOWLIST
@@ -166,8 +188,23 @@ def _build_network(profile: AgentProfile) -> Network:
                     rules=_allowlist_rules(profile.allowed_domains),
                 ),
                 strict=False,
+                dns=_PRIVATE_DNS if profile.allow_private_dns else None,
                 tls=tls,
             )
+
+
+def _corporate_rules() -> tuple[Rule, ...]:
+    """An explicit deny of cloud metadata, then DNS, then public and private networks.
+
+    The metadata deny comes first because the first matching rule wins. The host is a
+    separate group and is never allowed, so services listening on it stay out of reach.
+    """
+    return (
+        Rule.deny(destination=Destination.group(DestGroup.METADATA)),
+        *Rule.allow_dns(),
+        Rule.allow(destination=Destination.group(DestGroup.PUBLIC)),
+        Rule.allow(destination=Destination.group(DestGroup.PRIVATE)),
+    )
 
 
 def _allowlist_rules(allowed_domains: Sequence[str]) -> tuple[Rule, ...]:

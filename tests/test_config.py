@@ -115,6 +115,17 @@ def test_given_a_name_in_both_env_and_secrets_when_creating_a_profile_then_rejec
         AgentProfile(name="x", env={"KEY": "sk-real"}, secrets={"KEY": HostSecret(hosts=("a.example",))})
 
 
+@pytest.mark.parametrize("mode", [NetworkMode.OFFLINE, NetworkMode.PUBLIC, NetworkMode.CORPORATE, NetworkMode.UNRESTRICTED])
+def test_given_allow_private_dns_outside_allowlist_when_creating_a_profile_then_rejects_it(mode: NetworkMode) -> None:
+    """It would do nothing there, so a profile that sets it is a misunderstanding."""
+    with pytest.raises(ValidationError, match="allow_private_dns only applies to network = 'allowlist'"):
+        AgentProfile(name="x", network=mode, allow_private_dns=True)
+
+
+def test_given_allow_private_dns_with_allowlist_when_creating_a_profile_then_accepts_it() -> None:
+    assert AgentProfile(name="x", allowed_domains=(".corp.com",), allow_private_dns=True).allow_private_dns is True
+
+
 # --------------------------------------------------------------------------- host paths
 
 

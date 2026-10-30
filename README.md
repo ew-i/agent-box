@@ -335,7 +335,7 @@ so it can't carry the real key either.
 
 With `network = "allowlist"`, agentbox bypasses every allowed domain except the secret's
 hosts, so you only list extras in `tls_bypass`. The secret's hosts must be in
-`allowed_domains`, or every request to them would be blocked. With `public` (or
+`allowed_domains`, or every request to them would be blocked. With `public`, `corporate` (or
 `unrestricted`), every site not in `tls_bypass` is decrypted:
 
 ```toml
@@ -372,7 +372,12 @@ Network modes (`NetworkMode`):
   by looking up an allowed domain, so pointing an allowed name at another server doesn't
   get through. Plain HTTP on port 80 stays blocked, including Debian's default apt mirrors.
 - `public` — public internet only; private, host-local and metadata ranges stay blocked.
-- `unrestricted` — everything, including the host. Local debugging only.
+- `corporate` — public internet plus private networks, e.g. an intranet behind a VPN. DNS
+  rebind protection is off, so internal names resolve. The host and cloud metadata stay
+  blocked. The agent can reach every internal service; for a few hosts only, prefer
+  `allowlist` with `allow_private_dns` (below).
+- `unrestricted` — everything, including the host. DNS rebind protection is off, so
+  names that resolve to private IPs (corporate network, VPN) work. Local debugging only.
 
 Add your own in `$XDG_CONFIG_HOME/agentbox/profiles.toml` — falling back to
 `~/.config/agentbox/profiles.toml` when that variable is unset — or point `$AGENTBOX_CONFIG`
@@ -386,6 +391,19 @@ memory_mib = 8192
 network = "allowlist"
 allowed_domains = [".crates.io", ".static.crates.io"]
 setup_script = "rustup component add clippy"
+```
+
+Intranet hosts behind a VPN resolve to private IPs, which microsandbox's DNS rebind
+protection drops. `allow_private_dns = true` turns that off for an `allowlist` profile.
+Every allowed domain may then resolve into the private network, so keep the list to
+domains you trust:
+
+```toml
+[profiles.corporate]
+image = "agent-box"
+network = "allowlist"
+allowed_domains = [".corp.com", ".pypi.org", ".files.pythonhosted.org"]
+allow_private_dns = true
 ```
 
 Two kinds of storage outlive a stop. `named_volumes = { "/home/me" = "my-home" }` is a

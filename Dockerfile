@@ -15,7 +15,8 @@ RUN sed -i -E 's|^# (http://snapshot\.debian\.org/.+)$|URIs: \1\nCheck-Valid-Unt
  && grep -q '^URIs: http://snapshot' /etc/apt/sources.list.d/debian.sources \
  && apt-get update && apt-get install -y --no-install-recommends \
       git=1:2.47.3-0+deb13u1 curl=8.14.1-2+deb13u7 ca-certificates=20250419+deb13u1 \
-      ripgrep=14.1.1-1+b4 fd-find=10.2.0-1+b5 jq=1.7.1-6+deb13u4 less=668-1 \
+      ripgrep=14.1.1-1+b4 fd-find=10.2.0-1+b5 jq=1.7.1-6+deb13u4 less=668-1 nano=8.4-1+deb13u1 \
+      htop=3.4.1-5 bind9-dnsutils=1:9.20.29-1~deb13u1 \
       vim=2:9.1.1230-2 sudo=1.9.16p2-3+deb13u2 unzip=6.0-29+deb13u1 procps=2:4.0.4-9 \
       rsync=3.5.0+ds1-0+deb13u1 build-essential=12.12 \
     && rm -rf /var/lib/apt/lists/*
@@ -136,8 +137,10 @@ RUN install -m 0755 -d /etc/apt/keyrings \
       iptables=1.8.11-2 \
  && rm -rf /var/lib/apt/lists/* \
  && usermod -aG docker agent-box
-COPY --chmod=755 start-dockerd.sh /usr/local/bin/agent-box-start-dockerd
-COPY --chmod=755 docker-entrypoint.sh /usr/local/bin/agent-box-docker-entrypoint
+COPY start-dockerd.sh /usr/local/bin/agent-box-start-dockerd
+COPY docker-entrypoint.sh /usr/local/bin/agent-box-docker-entrypoint
+RUN chmod 755 /usr/local/bin/agent-box-start-dockerd \
+    /usr/local/bin/agent-box-docker-entrypoint
 USER agent-box
 ENTRYPOINT ["agent-box-entrypoint", "agent-box-docker-entrypoint"]
 CMD ["bash"]

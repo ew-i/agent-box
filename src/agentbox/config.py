@@ -27,6 +27,10 @@ class NetworkMode(StrEnum):
     PUBLIC = "public"
     """Public internet only; private, host-local and metadata ranges stay blocked."""
 
+    CORPORATE = "corporate"
+    """Public internet plus private networks, e.g. an intranet behind a VPN. The host and
+    cloud metadata stay blocked."""
+
     UNRESTRICTED = "unrestricted"
     """Everything, including the host. Only for local debugging."""
 
@@ -114,6 +118,12 @@ class AgentProfile(BaseModel):
     network: NetworkMode = NetworkMode.ALLOWLIST
     allowed_domains: tuple[str, ...] = ()
 
+    allow_private_dns: bool = False
+    """Let ``allowed_domains`` resolve to private IPs, e.g. intranet hosts behind a VPN.
+    Turns off DNS rebind protection for the whole sandbox, so any allowed domain could then
+    point into the private network. Only for ``allowlist``: ``corporate`` and ``unrestricted``
+    always have it off, and ``public`` blocks private IPs anyway."""
+
     tls_bypass: tuple[str, ...] = ()
     """Hosts that keep their real certificate once a secret turns on TLS interception, e.g.
     ``*.docker.io``. The allowlist already bypasses every allowed domain except the secret
@@ -142,6 +152,14 @@ class AgentProfile(BaseModel):
         # A real value in env would sit next to the placeholder, visible to the guest.
         if both := sorted(self.env.keys() & self.secrets.keys()):
             raise ValueError(f"{', '.join(both)} in both env and secrets; keep it only in secrets")
+        return self
+
+    @model_validator(mode="after")
+    def _private_dns_only_for_allowlist(self) -> Self:
+        if self.allow_private_dns and self.network is not NetworkMode.ALLOWLIST:
+            raise ValueError(
+                f"allow_private_dns only applies to network = 'allowlist', not '{self.network}'"
+            )
         return self
 
     def required_directories(self) -> list[str]:
