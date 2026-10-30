@@ -36,3 +36,12 @@ vulnerabilities:
     purls: ["pkg:npm/undici@6.28.0"]
     expired_at: 2026-12-07
     statement: npm bundled with Node, waiting for Node release
+  # undici bundled inside npm; even npm 12.2.1 ships 6.29.0, fix needs 6.29.1.
+  - id: CVE-2026-109383
+    purls: ["pkg:npm/undici@6.28.0"]
+    expired_at: 2026-12-07
+    statement: undici bundled with npm, waiting for npm release
+  - id: CVE-2026-87018
+    purls: ["pkg:npm/undici@6.28.0"]
+    expired_at: 2026-12-07
+    statement: undici bundled with npm, waiting for npm release
