@@ -1,3 +1,2 @@
-# Keep LF endings so the image and the bash launcher work when checked out on Windows
+# Keep LF endings so the image builds when checked out on Windows
 * text=auto eol=lf
-*.ps1 text eol=crlf

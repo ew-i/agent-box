@@ -1,589 +1,467 @@
 # agent-box
 
-A simple disposable, isolated Linux container for running terminal coding agents on a project without giving them access to the rest of your computer.
+Sandboxed execution environments for coding agents, backed by
+[microsandbox](https://microsandbox.dev/) microVMs.
 
-- The container sees **only the project folder** you start it from.
-- Agent logins, settings, history and the agents themselves live in a **named volume**, so they survive between runs.
-- The container itself is thrown away on exit (`--rm`).
-- Optional: a [Docker mode](#docker-inside-the-sandbox) gives the agent its own private Docker.
+[![build](https://github.com/ew-i/agent-box/actions/workflows/deploy.yml/badge.svg)](https://github.com/ew-i/agent-box/actions/workflows/deploy.yml) [![coverage](https://raw.githubusercontent.com/ew-i/badges/main/agent-box/coverage.svg)](https://github.com/ew-i/agent-box) [![codeql](https://github.com/ew-i/agent-box/actions/workflows/codeql.yml/badge.svg)](https://github.com/ew-i/agent-box/actions/workflows/codeql.yml) ![Python](https://img.shields.io/badge/python-3.11_%E2%80%93_3.15-yellow?labelColor=blue)
 
-It isn't tied to one tool, OS or container engine:
+A coding agent that can run commands is only as safe as the box it runs them in. `agentbox`
+is a CLI that boots microsandbox microVMs from **declarative profiles**: each profile pins the
+image, CPU/memory limits, lifetime, workspace mount and — most importantly — the network
+policy an agent is allowed to use. Booting a sandbox is then a one-liner, and what the
+agent may reach is reviewable data instead of scattered command-line flags.
 
-| | Works with |
-|---|---|
-| **Coding agents** | Claude Code, opencode, OpenAI Codex CLI, Gemini CLI, Aider, or any other CLI agent you can install on Linux |
-| **Host OS** | macOS, Linux, Windows (WSL2 or PowerShell) |
-| **Container engine** | OrbStack, Docker Desktop, Podman, Colima, Rancher Desktop, Docker Engine on Linux |
+Each sandbox is a hardware-isolated microVM with its own kernel, so generated code cannot
+escape into the host the way a container breakout can.
 
----
+The workspace you mount is the exception: the agent can write to it, `.git/` included. A hook
+in `.git/hooks/` or a `core.fsmonitor` command in `.git/config` runs on the host the next
+time you use git there, and many shell prompts run `git status` on their own. Mount with
+`--readonly` when the agent only needs to read: the host enforces it, so even root in the box
+can't undo it. A read-only mount of just `.git` doesn't help, since root in the box can unmount
+it and write through the workspace below. With a writable workspace, check `.git/hooks` and
+`.git/config` before running git on the host.
 
-## Files
+`--readonly` covers the workspace only. The `agent-box` profiles share one writable home
+volume (see [Working in it](#working-in-it)), so an agent in one box can change `~/.bashrc` or
+agent settings that every other box runs, including a box with a writable workspace. Give an
+untrusted project a profile with its own home, e.g.
+`named_volumes = { "/home/agent-box" = "agent-box-home-untrusted" }`.
 
-| File | Purpose |
-|---|---|
-| `Dockerfile` | The image: Debian 13 + common dev tools + mise + the agents you choose; optional PHP and Docker variants |
-| `mise/` | Toolchains: always-on Node.js and GitHub CLI (`config.toml`) and [presets](#toolchain-presets-java-go-node-python) for Java, Go, Node and Python |
-| `entrypoint.sh` | Installs the selected toolchains on start |
-| `agentbox` | Launcher for macOS, Linux and WSL (bash) |
-| `agentbox.ps1` | Launcher for Windows PowerShell |
-| `docker-entrypoint.sh` | Starts and stops the private Docker daemon in [Docker mode](#docker-inside-the-sandbox) |
+## Requirements
 
----
+- Python 3.11+
+- [uv](https://docs.astral.sh/uv/)
+- A host that can run microVMs: Linux with KVM (`/dev/kvm`), or macOS on Apple Silicon.
+  Check with `msb doctor`.
 
-## How the storage is laid out
+Most people already have `msb` from the microsandbox installer
+(`curl -fsSL https://install.microsandbox.dev | sh`). It is not strictly required: the
+`microsandbox` wheel bundles the runtime and an `msb` binary, so `uv sync` alone is enough
+to boot sandboxes — you just reach that copy as `uv run msb`.
 
-| Inside the container | Comes from | What's in it | Persists? |
-|---|---|---|---|
-| `/workspace/<project>` | **Bind mount** of the folder you start from | Your code | Yes, it's your real folder |
-| `/home/agent-box` | **Named volume** `agent-box-home` | Agent binaries, logins, config, session history, npm globals, caches, git config | Yes, until you delete the volume |
-| `/var/lib/docker` (Docker mode only) | **Named volume** `agent-box-docker-<project>-<hash>` | The private Docker's images, containers and volumes | Yes, until you delete the volume |
-| everything else (`/usr`, `/tmp`, apt packages, …) | The image | OS + tools from the `Dockerfile` | No, it resets every run |
-
-> **Bind mount vs named volume:** a bind mount maps a specific host folder into the container, so changes show up on both sides. A named volume is storage managed by the container engine. It doesn't appear in your normal filesystem, and the container can't use it to reach anything else.
-
-Where common agents keep their data. All of it is under `/home/agent-box`, i.e. in the volume:
-
-| Agent | Config / auth / history |
-|---|---|
-| Claude Code | `~/.claude/`, `~/.claude.json` |
-| opencode | `~/.config/opencode/`, `~/.local/share/opencode/`, `~/.local/state/opencode/` |
-| Codex CLI | `~/.codex/` |
-| Gemini CLI | `~/.gemini/` |
-
-Any other agent works the same way, as long as it stores its state under `$HOME`.
-
----
-
-## Setup (once)
-
-### 1. Choose your agents
-
-Open the `Dockerfile` and find the `Coding agents` section. Uncomment the agents you want and comment out the rest:
-
-```dockerfile
-# Claude Code
-RUN curl -fsSL https://claude.ai/install.sh | bash
-# opencode
-RUN curl -fsSL https://opencode.ai/v2/install | bash
-# OpenAI Codex CLI
-# RUN npm install -g @openai/codex
-...
-```
-
-To add another agent, add a `RUN` line with its Linux install command. Node.js/npm is always available (from mise); for `uv tool install`, start with `agentbox -p python`. `npm install -g` and `uv tool install` both install into `~/.local`, so they work without root, and agents can update themselves later.
-
-### 2. Install the launcher
-
-The launcher is a thin wrapper around `docker run` that always mounts things the same way.
-
-**macOS, Linux, WSL:**
+## Setup
 
 ```bash
-mkdir -p ~/.local/bin
-cp agentbox ~/.local/bin/
-chmod +x ~/.local/bin/agentbox
+uv sync
+uv run agentbox profiles
 ```
 
-Make sure `~/.local/bin` is on your `PATH`. If it isn't, add `export PATH="$HOME/.local/bin:$PATH"` to `~/.zshrc` or `~/.bashrc`.
+## Usage
 
-**Windows PowerShell:** copy `agentbox.ps1` to a folder on your `PATH`, or call it by its full path. If PowerShell refuses to run local scripts, you'll need to allow them for your user (`Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`). Decide whether that's acceptable for your machine. PowerShell also removes a bare `--` from the command line, so quote it when the command needs one: `agentbox npm test "--" --watch`.
+One-shot — boot, run, tear down:
 
-### 3. Build the image
+```bash
+uv run agentbox run airgapped 'python -c "print(1)"'
+uv run agentbox run airgapped 'ls /workspace' -w ./my-project
+```
 
-From the folder containing the `Dockerfile`:
+Long-lived — boot once, connect as often as you like:
 
-**macOS / Windows** (OrbStack, Docker Desktop, Colima, Rancher Desktop):
+```bash
+uv run agentbox up agent-box --name mybox -w ./my-project
+msb exec mybox -- bash                 # interactive shell
+msb exec mybox -- git status           # one command
+uv run agentbox ls                       # name, status, profile
+uv run agentbox down mybox               # stop + delete state
+```
+
+`up` prints **only the sandbox name** on stdout, so it composes:
+
+```bash
+BOX=$(uv run agentbox up airgapped)
+msb exec "$BOX" -- python -c "print('hi')"
+uv run agentbox down "$BOX"
+```
+
+Hints, warnings, `setup_script` output and `ls`-is-empty messages go to stderr.
+
+`up` with the name of a stopped box starts that box again, with the settings it was created
+with. If you now ask for another profile, workspace, `--readonly` or `--network`, or you edited
+the profile's `network`, `allowed_domains`, `tls_bypass`, `secrets` or `named_volumes`, it
+refuses instead, since the box would keep its old mounts and network: `agentbox down` it first. It also keeps
+its secret values and time limits: a rotated key or a new `--idle-timeout` or
+`--max-duration` only applies after `agentbox down`.
+
+> **Why `uv run agentbox` but bare `msb`?** `agentbox` is a project console script living in
+> `.venv/bin`, so it needs `uv run` (or an activated venv). `msb` is normally installed
+> system-wide by the microsandbox installer and works as-is. If you only ran `uv sync`,
+> the wheel's bundled `msb` is in `.venv/bin` too and needs the prefix — the hints
+> `agentbox up` prints detect which case applies.
+
+Other commands:
+
+```bash
+uv run agentbox profiles                 # list profiles
+uv run agentbox show agent-box           # inspect one as JSON
+uv run agentbox version
+```
+
+`show` prints the profile that would **actually** boot, not the stored defaults, so it
+takes the same override flags as `run` and `up`. `env` values print as `***`, so API keys
+in a profile don't end up in your terminal:
+
+```bash
+uv run agentbox show airgapped --idle-timeout 0 --max-duration 0   # both print null
+uv run agentbox show airgapped -w ./my-project --readonly -n public
+```
+
+Because `up` reshapes a profile, ask about it explicitly with `--for up`:
+
+```bash
+uv run agentbox show airgapped         # ephemeral true,  idle 600,  max 3600  (as `run` boots it)
+uv run agentbox show airgapped --for up # ephemeral false, idle null, max null  (as `up` boots it)
+```
+
+### `run` vs `up`
+
+|                   | `run`                          | `up`                                     |
+|-------------------|--------------------------------|------------------------------------------|
+| Script argument   | required                       | none — you connect later                 |
+| Lifetime          | dies when the command finishes | runs until `agentbox down`               |
+| Idle / max limits | profile's, as a backstop       | none, unless you pass the flags          |
+| `ephemeral`       | `True` (profile default)       | forced `False`, so state survives a stop |
+| Output            | the command's stdout/stderr    | the sandbox name                         |
+
+`up` is for development boxes, so it drops the profile's guard rails: the sandbox stays
+alive until you run `agentbox down`, no matter how long you leave it idle.
+
+```
+$ uv run agentbox up agent-box --name agentbox
+agentbox
+msb exec agentbox -- /bin/bash
+agentbox down agentbox
+no time limit; runs until you stop it with the command above
+```
+
+Opt back into a limit when you want one — for example on a shared machine:
+
+```bash
+uv run agentbox up agent-box --name capped --idle-timeout 600 --max-duration 7200
+# auto-stops after 10m idle; --idle-timeout 0 disables it
+# stops after 2h even if busy; --max-duration 0 disables it
+```
+
+The two limits are independent: `--idle-timeout` fires when nobody is using the sandbox,
+`--max-duration` fires regardless of how busy it is. `0` means the same as omitting the
+flag. `run` is the opposite case — it executes a one-shot command, so it keeps the
+profile's `idle_timeout_s` and `max_duration_s` as a backstop against a hung command.
+Use `agentbox show PROFILE --for up` to see the result before booting anything.
+
+## The `agent-box` image
+
+The `Dockerfile` builds the image the `agent-box` profile boots: Debian 13, common dev
+tools, [mise](https://mise.jdx.dev) for language toolchains, and the coding agents you pick.
+microsandbox runs OCI images, so build it with Docker and load it into microsandbox's own
+image store. No registry is needed:
 
 ```bash
 docker build -t agent-box .
+docker save agent-box | msb image load -t agent-box
 ```
 
-**Native Linux.** Pass your user and group IDs so files the agents create in your project are owned by you:
+Repeat both steps after every change to the `Dockerfile` or `mise/`. On Apple Silicon the
+build is arm64, which is what the microVM runs. To check that microsandbox has your latest
+build, compare the layers `docker image inspect` and `msb image inspect` list. The CREATED
+column of `msb image ls` doesn't change when you load the image again.
+
+**Choose your agents** in the `Coding agents` section of the `Dockerfile`: uncomment the
+ones you want. Claude Code and opencode are on by default. To add another agent, add a
+`RUN` line with its Linux install command. `npm install -g` and `uv tool install` both
+install into `~/.local`, so agents can update themselves later.
+
+**Build args:**
+
+| Build arg               | Default   | What you get                                                                        |
+|-------------------------|-----------|-------------------------------------------------------------------------------------|
+| `MISE_VERSION`          | `2026.10` | Latest mise of that month, from the official `jdxcode/mise` image                   |
+| `PHP_VERSION`           | `8.5`     | PHP CLI from the [Sury repository](https://packages.sury.org/php/) (PHP image only) |
+| `COMPOSER_VERSION`      | `2`       | Latest Composer of that major version (PHP image only)                              |
+| `USER_UID` / `USER_GID` | `1000`    | Owner of files the agent creates                                                    |
+
+### Working in it
 
 ```bash
-docker build --build-arg USER_UID=$(id -u) --build-arg USER_GID=$(id -g) -t agent-box .
+uv run agentbox up agent-box --name my-app -w ~/code/my-app
+msb exec my-app -- bash -l
 ```
 
-**Podman.** Use `podman build` with the same arguments.
+Inside, log in to your agents once (`claude`, `opencode auth login`) and set your git
+identity (`git config --global user.name ...`). The `/home/agent-box` folder is the named
+volume `agent-box-home`. It's shared by every `agent-box` sandbox and survives `agentbox
+down`, so logins, agent self-updates, session history and installed toolchains carry over.
 
-**Language versions.** All toolchains come from [mise](#toolchain-presets-java-go-node-python), except PHP, which has its own [PHP image](#php-image). Build args:
+A new microsandbox volume starts empty: unlike a Docker volume, it isn't filled from the
+image. The image therefore keeps a copy of its built home in `/opt/agent-box-home`, and
+`agent-box-entrypoint` copies it into a volume that has no `.bashrc` yet. The profile's
+`setup_script` runs the entrypoint on every boot, because `Sandbox.create` skips the image
+entrypoint.
 
-| Build arg | Default | What you get |
-|---|---|---|
-| `MISE_VERSION` | `2026.10` | Latest [mise](https://mise.jdx.dev) of that month, from the official `jdxcode/mise` image |
-| `PHP_VERSION` | `8.5` | PHP CLI from the [Sury repository](https://packages.sury.org/php/) (PHP image only) |
-| `COMPOSER_VERSION` | `2` | Latest Composer of that major version, from the official `composer` image (PHP image only) |
+The profile uses the `public` network mode: mise downloads from too many hosts
+(nodejs.org, GitHub, Adoptium, Maven Central, ...) to list in an allowlist.
 
-#### Toolchain presets (Java, Go, Node, Python)
+### Toolchain presets (Java, Go, Node, Python)
 
-Instead of baking every language into the image, [mise](https://mise.jdx.dev) installs toolchains on first use into the home volume. Node.js (many agents ship via npm) and the GitHub CLI `gh` are always on (`mise/config.toml`). Everything else is a preset you pick per run with `-p` (or `AGENTBOX_PRESETS`):
+mise installs toolchains on first use into the home volume, not into the image. Node.js
+and the GitHub CLI `gh` are always on (`mise/config.toml`). Everything else is a preset,
+selected with `MISE_ENV`:
+
+| Preset   | Tools                                                                 |
+|----------|-----------------------------------------------------------------------|
+| `java`   | Temurin JDK 27, Maven, Gradle, jbang                                  |
+| `go`     | Go, golangci-lint                                                     |
+| `node`   | corepack (`yarn`, `pnpm` as the project's `packageManager` pins), bun |
+| `python` | Python 3.14, uv                                                       |
+
+For one shell, run it through the entrypoint so the preset installs first:
 
 ```bash
-agentbox -p java claude
-agentbox -p go,node
+msb exec -e MISE_ENV=java,go my-app -- agent-box-entrypoint bash -l
 ```
 
-| Preset | Tools |
-|---|---|
-| `java` | Temurin JDK 27, Maven, Gradle, jbang |
-| `go` | Go, golangci-lint |
-| `node` | corepack (provides `yarn` and `pnpm` in the version the project's `packageManager` field pins), bun. Node.js 26 itself is always on |
-| `python` | Python 3.14, uv |
+To always use some presets, add a profile in your `profiles.toml` (see
+[Profiles](#profiles)) with `env = { MISE_ENV = "java,go" }` and the fields of the
+`agent-box` profile.
 
-The first start with a new preset takes up to a minute while it downloads. After that the tools are cached in the volume. The presets are plain mise config files in [`mise/`](mise/), pinned to exact versions so every start gets the same tools. Edit a version there or add your own, e.g. `mise/config.rust.toml` for `agentbox -p rust`, then rebuild the image.
+The first start with a new preset takes up to a minute; after that the tools are cached
+in the volume. Presets are plain mise config files in [`mise/`](mise/), pinned to exact
+versions. Add your own, e.g. `mise/config.rust.toml` for `MISE_ENV=rust`, then rebuild.
+There's no `python3` without the `python` preset. Prefer `uv` over `pip install`.
 
-**Python** comes from the `python` preset, not from Debian, so without it there's no `python3` (npm packages that compile native code with node-gyp need it too). Prefer uv over `pip install`:
+**Per project:** a `mise.toml` in the project overrides the presets (`mise use
+java@temurin-21 maven`). A `mise.toml` can run code, so mise ignores one it hasn't been
+told to trust. Read it first, especially in a repo you cloned, then `mise trust && mise
+install`.
 
-```bash
-uv init                 # new project
-uv add requests         # add a dependency
-uv run pytest           # run in the project's venv
-uvx ruff check          # one-off tools
-uv tool install ruff    # persistent tools (into ~/.local/bin)
-```
+### PHP image
 
-**Per project:** a `mise.toml` in the project overrides the presets. You (or the agent) can create one inside the container:
-
-```bash
-mise use java@temurin-21 maven   # writes mise.toml, commit it with the project
-mise use ruby@3.4                # anything in `mise registry`
-```
-
-A `mise.toml` can run code, so mise ignores one it hasn't been told to trust, and tools then fail with `Config files in … are not trusted`. Read it first, especially in a repo you cloned, then trust it once (it's remembered in the volume):
-
-```bash
-mise trust && mise install
-```
-
-#### PHP image
-
-PHP isn't a mise preset: mise can only compile PHP from source, which is slow and needs dozens of system packages. Instead it's a separate image built with `--target php`, using Sury's prebuilt packages:
+PHP isn't a mise preset: mise can only compile PHP from source. It's a separate image
+built from Sury's prebuilt packages:
 
 ```bash
 docker build --target php -t agent-box:php .
-agentbox --php claude
+docker save agent-box:php | msb image load -t agent-box:php
 ```
 
-Presets work in it too, e.g. `agentbox --php -p node`.
+Boot it with a user profile that copies `agent-box` and sets `image = "agent-box:php"`.
+It has the extensions a typical Laravel app needs: bcmath, curl, gd, imagick, intl,
+mbstring, mysql, readline, redis, sqlite3, xml and zip. To add one, append its package
+(e.g. `php${PHP_VERSION}-pgsql`) to the PHP `apt-get install` line.
 
-PHP comes with the extensions a typical Laravel app needs: bcmath, curl, gd, imagick, intl, mbstring, mysql (MySQL/MariaDB), readline, redis, sqlite3, xml and zip, plus the ones built into PHP (pcntl, posix, opcache, …). To add one, append its package (e.g. `php${PHP_VERSION}-pgsql`) to the PHP `apt-get install` line in the `Dockerfile`. `composer global require` installs into `~/.config/composer/vendor/bin`, which is on the `PATH`.
+**Xdebug** is installed but not loaded: just loading it makes PHP about 60 % slower, even
+with `xdebug.mode=off`. Load it for one command with `with-xdebug php artisan test
+--coverage`, or for a whole shell with `PHP_INI_SCAN_DIR=:/etc/php/xdebug.d`. Step
+debugging (`XDEBUG_MODE=debug`) has to reach your IDE on the host, which the `public` network
+blocks: it needs a profile with `network = "unrestricted"` and
+`XDEBUG_CONFIG="client_host=<host address>"`.
 
-**Xdebug (code coverage, step debugging).** Xdebug is installed but **not loaded by default**. Just loading it makes PHP about 60 % slower, even with `xdebug.mode=off` (measured on a Laravel test suite: 122 s → 195 s). That would slow down every `composer` and `artisan` call. Load it only when you need it:
+### Docker inside the sandbox
+
+The `docker` target adds Docker Engine. The `agent-box-php-docker` profile boots it built on
+top of the PHP image:
 
 ```bash
-with-xdebug php artisan test --coverage          # one command, coverage mode
-XDEBUG_MODE=debug with-xdebug php artisan serve  # one command, another mode
+docker build --target docker --build-arg DOCKER_BASE=php -t agent-box:php-docker .
+docker save agent-box:php-docker | msb image load -t agent-box:php-docker
+uv run agentbox up agent-box-php-docker --name my-app -w ~/code/my-app
 ```
 
-For a whole session (e.g. an agent that keeps running coverage), start agent-box with Xdebug loaded:
+Two things make Docker work in a microVM, and a profile of your own needs both. This one
+uses the `docker` target without PHP:
 
-```bash
-AGENTBOX_OPTS="-e PHP_INI_SCAN_DIR=:/etc/php/xdebug.d" agentbox --php claude
+```toml
+[profiles.docker]
+image = "agent-box:docker"
+cpus = 4
+memory_mib = 4096
+network = "public"
+named_volumes = { "/home/agent-box" = "agent-box-home" }
+disks = { "/var/lib/docker" = 20480 }
+setup_script = "agent-box-entrypoint agent-box-start-dockerd"
 ```
 
-**Optional: the Docker-mode image.** Only needed if you want [Docker inside the sandbox](#docker-inside-the-sandbox). It's the same image plus Docker Engine, with the same build args. Add `--build-arg DOCKER_BASE=php` to build it on top of the PHP image:
+- **`setup_script`** runs [`start-dockerd.sh`](start-dockerd.sh), installed in the image
+  as `agent-box-start-dockerd`, after the entrypoint's usual home seeding and `mise
+  install`. It starts dockerd in the background and waits until it answers. If dockerd
+  doesn't start, the boot fails and shows the last lines of `/tmp/dockerd.log`. The image's
+  `docker-entrypoint.sh` uses the same script under plain Docker.
+- **`disks`** gives `/var/lib/docker` a 20 GiB ext4 disk that belongs to that one sandbox.
+  Docker can't keep its data on the microVM's root, which is overlayfs already: `docker run`
+  fails with "failed to mount ... overlay ... invalid argument". The disk file is sparse, so
+  it only takes the space actually used. Pulled images survive a stop and start, and
+  `agentbox down` deletes the disk. Every sandbox has its own, so two boxes don't share an
+  image cache.
 
-```bash
-docker build --target docker -t agent-box:docker .
-docker build --target docker --build-arg DOCKER_BASE=php -t agent-box:php-docker .   # PHP + Docker
-agentbox --php -d
-```
+A box restarted with `msb start` instead of `agentbox up` skips `setup_script`. Start
+dockerd there with `msb exec my-app -- agent-box-start-dockerd`.
 
-### 4. Log in to your agents (once, the volume remembers)
+### Updating
 
-```bash
-cd ~/code/some-project
-agentbox
-```
+- **Agents** update themselves inside the volume (`claude update`, `opencode update`).
+- **Toolchains** are pinned in `mise/*.toml`. Raise a version and rebuild; it installs on
+  the next start. `mise outdated --bump` lists what's newer, `mise prune` cleans up.
+- **apt packages** are pinned and read from the [snapshot.debian.org](https://snapshot.debian.org)
+  date the pinned `debian:trixie` digest names. To update, bump the digest and copy the
+  new versions (`apt-cache policy <package>`) into the pins. PHP (Sury) has no snapshot, so
+  only the PHP minor is pinned.
+- `docker build --pull --no-cache -t agent-box .` picks up the newest mise and Composer.
 
-Inside the container, log in to the agents you installed:
+An agent you **add** to the `Dockerfile` later won't appear in an existing home volume,
+which is only seeded once. Install it inside the sandbox, or reset the volume with
+`msb volume rm agent-box-home` (you'll have to log in again).
 
-```bash
-claude                  # prints a login URL → open it in your browser → paste the code back
-opencode auth login     # or run `opencode` and use /connect
-codex                   # Codex CLI
-gemini                  # Gemini CLI
-```
+### Secrets
 
-Then set your git identity:
+Give an API key to a profile's `secrets`, not its `env`. The key itself never goes into
+the profile: agentbox reads it from your shell's variable of the same name at boot.
 
-```bash
-git config --global user.name  "Your Name"
-git config --global user.email "you@example.com"
-```
-
-Alternatively, skip interactive logins and use API keys (see [Secrets](#secrets-api-keys-tokens)).
-
----
-
-## Daily use
-
-```bash
-cd ~/code/my-app
-agentbox                    # shell in the container
-agentbox claude             # start an agent directly
-agentbox opencode
-agentbox codex
-agentbox claude --dangerously-skip-permissions   # reasonable here: the agent can only touch this project
-```
-
-Flags go before the command and pick the image and toolchains (`agentbox --help` lists them):
-
-```bash
-agentbox -p node,python claude    # toolchain presets
-agentbox --php claude             # PHP image
-agentbox --php -d -p node,python  # PHP + Docker inside the sandbox + presets
-```
-
-| Flag | Same as |
-|---|---|
-| `-d`, `--docker` | `AGENTBOX_DOCKER=1`, [Docker inside the sandbox](#docker-inside-the-sandbox) |
-| `--php` | `AGENTBOX_IMAGE=agent-box:php` (`agent-box:php-docker` with `-d`), the [PHP image](#php-image) |
-| `-p`, `--presets LIST` | `AGENTBOX_PRESETS=LIST`, [toolchain presets](#toolchain-presets-java-go-node-python) |
-
-A second shell in the same running container, e.g. to run two agents side by side:
-
-```bash
-docker exec -it agent-box-code-my-app bash
-```
-
-You can run containers for several projects at once. They share the `agent-box-home` volume, so you're logged in everywhere. Each container is named after the project folder and its parent, e.g. `~/code/my-app` runs as `agent-box-code-my-app`, so `~/work/api` and `~/client/api` don't collide. Its Docker-mode volume adds a hash of the full path (`agent-box-docker-my-app-3f9a1c2e`), so same-named projects never share one; `docker volume ls` shows it.
-
-### What the launcher runs
-
-```bash
-docker run -it --rm \
-  --name agent-box-<parent>-<project> --hostname agent-box-<parent>-<project> \
-  -v agent-box-home:/home/agent-box \
-  -v "<current folder>":/workspace/<project> \
-  -w /workspace/<project> \
-  [--privileged --init --stop-timeout 30 -v agent-box-docker-<project>-<hash>:/var/lib/docker]   # only with -d
-  [-e MISE_ENV=<presets>]                # only with -p
-  [--env-file ~/.config/agent-box/env]   # only if the file exists
-  [$AGENTBOX_OPTS]                       # your extra flags
-  agent-box [command, default: bash]     # :php, :docker or :php-docker with --php / -d
-```
-
-Each project is mounted at its own path (`/workspace/my-app`) rather than a shared `/workspace`. That's on purpose: most agents key session history by directory, so a single shared path would mix history from different projects.
-
-### Launcher settings
-
-Set these as environment variables, e.g. in your shell profile. `-d` and `-p` override `AGENTBOX_DOCKER` and `AGENTBOX_PRESETS`:
-
-| Variable | Default | Use |
-|---|---|---|
-| `AGENTBOX_ENGINE` | `docker` | Set to `podman` to use Podman |
-| `AGENTBOX_DOCKER` | `0` | Set to `1` for [Docker inside the sandbox](#docker-inside-the-sandbox) |
-| `AGENTBOX_IMAGE` | picked by `--php` / `-d` | Use a different image, e.g. `my-agent-box`. Overrides `--php` |
-| `AGENTBOX_PRESETS` | — | [Toolchain presets](#toolchain-presets-java-go-node-python), comma-separated, e.g. `java,go` |
-| `AGENTBOX_HOME_VOLUME` | `agent-box-home` | Use a separate home volume, e.g. per client or per project |
-| `AGENTBOX_ENV_FILE` | `~/.config/agent-box/env` | Location of the secrets file |
-| `AGENTBOX_OPTS` | — | Extra `docker run` flags, split on spaces, e.g. `-p 3000:3000` |
-
-Examples:
-
-```bash
-AGENTBOX_OPTS="-p 3000:3000" agentbox
-```
-
-```powershell
-$env:AGENTBOX_OPTS = "-p 3000:3000"; agentbox
-```
-
----
-
-## Dev servers
-
-Make sure the server listens on `0.0.0.0`, not `127.0.0.1`.
-
-- **OrbStack:** no port flags needed. A server on port 3000 in `agent-box-code-my-app` is at `http://agent-box-code-my-app.orb.local:3000`.
-- **Everything else:** publish the port, e.g. `AGENTBOX_OPTS="-p 3000:3000" agentbox`, then open `http://localhost:3000`.
-
-Most dev servers listen on `127.0.0.1` by default. For example:
-
-```bash
-php artisan serve --host=0.0.0.0     # Laravel, port 8000
-npm run dev -- --host 0.0.0.0        # Vite, port 5173
-```
-
----
-
-## Databases and other services on your machine
-
-Inside the sandbox, `127.0.0.1` is the container itself. A project whose `.env` points at `127.0.0.1` for its database, Redis or mail server therefore can't reach them, e.g. a MariaDB running in another container or directly on your machine.
-
-You don't need to edit `.env`. Environment variables set on the container override the values in `.env` (Laravel, and most dotenv loaders, never overwrite a variable that's already set). Two ways to point them at the real service:
-
-**Through your machine:** works for any service that publishes its port on your machine (`-p 3306:3306`, or a local install):
-
-```bash
-AGENTBOX_OPTS="-e DB_HOST=host.docker.internal -e REDIS_HOST=host.docker.internal" agentbox claude
-```
-
-**Through the service's Docker network:** reach another compose stack's containers by name. The network name is shown by `docker ps --format '{{.Names}} {{.Networks}}'`:
-
-```bash
-AGENTBOX_OPTS="--network lamp_default -e DB_HOST=lamp-mariadb118" agentbox claude
-```
-
-`host.docker.internal` works out of the box with OrbStack and Docker Desktop. On native Linux, add `--add-host=host.docker.internal:host-gateway` to `AGENTBOX_OPTS`.
-
-To keep these settings per project, put the variables in a separate env file (one `KEY=value` per line, e.g. `DB_HOST=host.docker.internal`) and select it with `AGENTBOX_ENV_FILE`. That file replaces the default secrets file for that run.
-
----
-
-## Docker inside the sandbox
-
-By default there's no Docker in the sandbox, so an agent can't run `docker compose up`.
-
-**Docker mode** fixes that. It gives the sandbox its own private Docker daemon, separate from the one on your machine.
-
-```bash
-docker build --target docker -t agent-box:docker .   # once
+```toml
+secrets = { OPENROUTER_API_KEY = { hosts = ["openrouter.ai"] } }
 ```
 
 ```bash
-cd ~/code/my-app
-agentbox -d claude
+export OPENROUTER_API_KEY=$(security find-generic-password -s openrouter -a "$USER" -w)
+uv run agentbox up dev --name my-app
 ```
 
-Inside the sandbox, `docker` and `docker compose` then work as on a normal machine:
+Inside, `OPENROUTER_API_KEY` holds only a placeholder (`$MSB_OPENROUTER_API_KEY`). Tools
+send it as usual, and microsandbox swaps in the real key in the `Authorization` header
+(`header = "x-api-key"` picks another one) of requests to `hosts`, so neither the agent nor
+the code it runs ever sees the key. To do that swap, microsandbox decrypts HTTPS once a
+profile has a secret, and a decrypted request that carries the placeholder to any other host
+is blocked. Hosts in `tls_bypass` keep their real certificate, which clients that don't trust
+microsandbox's CA need, like containers inside Docker. Bypassed traffic is never inspected,
+so it can't carry the real key either.
+
+With `network = "allowlist"`, agentbox bypasses every allowed domain except the secret's
+hosts, so you only list extras in `tls_bypass`. The secret's hosts must be in
+`allowed_domains`, or every request to them would be blocked. With `public` (or
+`unrestricted`), every site not in `tls_bypass` is decrypted:
+
+```toml
+network = "public"
+tls_bypass = ["*.docker.io", "*.docker.com"]
+```
+
+Boot fails if a secret host is missing from `allowed_domains` (allowlist mode), is in
+`tls_bypass`, or if the variable isn't set. A name can't be in both `env` and `secrets`.
+With `network = "offline"` (or `-n offline`) secrets are skipped, so the variable isn't needed.
+
+`msb exec -e ANTHROPIC_API_KEY=... my-app -- claude` passes a key to one command, but
+the guest sees the real value. Don't mount host credential folders into a sandbox
+(`~/.ssh`, `~/.aws`, `~/.config/gcloud`, `~/.kube`, your host's `~/.claude`): that undoes
+the isolation. For git push, use HTTPS with a fine-grained token, e.g. `GH_TOKEN` plus
+`gh auth setup-git`.
+
+## Profiles
+
+Built-ins live in `src/agentbox/profiles.py`:
+
+| Profile                | Image                                                             | Network         |
+|------------------------|-------------------------------------------------------------------|-----------------|
+| `airgapped`            | `python:3.11-slim`                                                | none            |
+| `agent-box`            | `agent-box` ([built here](#the-agent-box-image))                  | public internet |
+| `agent-box-php-docker` | `agent-box:php-docker` ([built here](#docker-inside-the-sandbox)) | public internet |
+
+Network modes (`NetworkMode`):
+
+- `offline` — no egress; `exec` and `fs` still work over the host-guest channel.
+- `allowlist` — deny by default, plus DNS and TCP/443 to `allowed_domains`
+  (a leading dot means "and all subdomains"). Cloud metadata is explicitly denied. A
+  domain is matched by the hostname a TLS client names, and only on an IP the guest got
+  by looking up an allowed domain, so pointing an allowed name at another server doesn't
+  get through. Plain HTTP on port 80 stays blocked, including Debian's default apt mirrors.
+- `public` — public internet only; private, host-local and metadata ranges stay blocked.
+- `unrestricted` — everything, including the host. Local debugging only.
+
+Add your own in `$XDG_CONFIG_HOME/agentbox/profiles.toml` — falling back to
+`~/.config/agentbox/profiles.toml` when that variable is unset — or point `$AGENTBOX_CONFIG`
+at any file:
+
+```toml
+[profiles.rust]
+image = "rust:1-slim"
+cpus = 8
+memory_mib = 8192
+network = "allowlist"
+allowed_domains = [".crates.io", ".static.crates.io"]
+setup_script = "rustup component add clippy"
+```
+
+Two kinds of storage outlive a stop. `named_volumes = { "/home/me" = "my-home" }` is a
+folder shared by every sandbox that names it. `disks = { "/var/lib/docker" = 20480 }` is an
+ext4 disk of that many MiB that belongs to one sandbox and is deleted with it.
+
+User profiles override built-ins with the same name. The lookup order is:
+
+| # | Source                                    |
+|---|-------------------------------------------|
+| 1 | `--config` / `-c`                         |
+| 2 | `$AGENTBOX_CONFIG`                        |
+| 3 | `$XDG_CONFIG_HOME/agentbox/profiles.toml` |
+| 4 | `~/.config/agentbox/profiles.toml`        |
+
+A relative `$XDG_CONFIG_HOME` is ignored, as the XDG spec requires. Nothing is ever
+written to these paths — you create the file yourself, and `agentbox` only reads it. Check
+where it is looking with `python -c "from agentbox.profiles import default_config_path;
+print(default_config_path())"`.
+
+A config file that is present but unreadable or invalid is reported as a
+`ProfileConfigError` naming the file and the offending field, so the CLI exits 2 with a
+message instead of a traceback. A missing file at the default path (3 or 4) is not an
+error — you just get the built-ins. A file named by `--config` or `$AGENTBOX_CONFIG` must
+exist, so a typo can't boot a built-in in place of your own profile of the same name.
+
+## Development
 
 ```bash
-docker compose up -d
-curl http://localhost:9000/api/system   # published ports are on localhost inside the sandbox
-docker compose down
+uv run ruff check --fix .
+uv run ruff format .
+uv run mypy
+uv run pytest                         # unit tests only; no microVM needed
+uv run pytest -m integration          # boots real microVMs
 ```
 
-### Ports
+Tests marked `integration` are excluded by default via `addopts`. Passing `-m integration`
+on the command line overrides that. They are skipped with a reason, rather than failed,
+on hosts without a microsandbox runtime (no `/dev/kvm`, no `msb` on `PATH`, Intel macOS).
 
-| From | How to reach a published port, e.g. `9000` |
-|---|---|
-| Inside the sandbox (agent, tests) | `http://localhost:9000` |
-| Your machine, with OrbStack | `http://agent-box-code-my-app.orb.local:9000`, no extra flags |
-| Your machine, other engines | Publish it on the sandbox as well: `AGENTBOX_OPTS="-p 9000:9000" agentbox -d` |
+Coverage is enforced at **100%**, statements and branches, via `fail_under = 100`. Unit
+tests never boot a microVM: `tests/fakes.py` provides stand-ins for `microsandbox.Sandbox`
+(the `runtime` and `start_session` fixtures wire them in), and `tests/test_cli.py` fakes
+`open_session`.
 
-### Lifetime
-
-- The stack runs as long as the sandbox does. When you leave the sandbox, the entrypoint stops the private daemon, which shuts the containers down cleanly.
-- Images and named compose volumes stay in `agent-box-docker-<project>-<hash>` for next time.
-- Run `docker compose down -v` inside the sandbox for a fresh state.
-- A second shell (`docker exec -it agent-box-code-my-app bash`) uses the same private daemon.
-
-### Security trade-off
-
-`--privileged` removes most of the walls between the container and the machine running it. Docker mode is therefore **much less isolated** than the default:
-
-- **macOS / Windows:** containers run in the engine's Linux VM. A privileged container could break out into that VM, and the VM can usually see your files (OrbStack and Docker Desktop share your home folder with it). An agent won't do this by accident, but a malicious prompt or dependency could.
-- **Native Linux:** there's no VM in between. A privileged container is close to root on your actual machine.
-- **Rootless Podman:** running a Docker daemon inside usually doesn't work there. This setup hasn't been tested with it.
-
-Use Docker mode only for projects where you need it. Keep the default mode for everything else. If the agent only needs to *call* the stack and not start or stop it, a safer option is to start the stack yourself on your machine and attach the sandbox to its network:
+Dependencies are pinned exactly in `pyproject.toml` and locked in `uv.lock`. To bump them:
 
 ```bash
-docker compose up -d
+uv lock --upgrade     # resolve newest versions
+uv sync
 ```
 
-```bash
-AGENTBOX_OPTS="--network my-app_default" agentbox claude
-```
+then copy the resolved versions from `uv.lock` back into the `==` pins.
 
-The agent then reaches the stack by service name, e.g. `http://graylog:9000`.
-
----
-
-## Secrets (API keys, tokens)
-
-Put them in an env file on the host instead of mounting credential folders. The default location is:
-
-- `~/.config/agent-box/env` on macOS, Linux and WSL
-- `%USERPROFILE%\.config\agent-box\env` on Windows
-
-Example contents (`KEY=value` per line, no quotes, no `export`). Comments go on their own line: a `#` after a value becomes part of the value:
+## Layout
 
 ```
-ANTHROPIC_API_KEY=sk-ant-...
-# Claude subscription instead of an API key: token from `claude setup-token` on your host
-# CLAUDE_CODE_OAUTH_TOKEN=...
-OPENAI_API_KEY=sk-...
-GEMINI_API_KEY=...
-# git over HTTPS / GitHub CLI
-GH_TOKEN=ghp_...
+src/agentbox/
+  config.py                 AgentProfile / WorkspaceMount / NetworkMode — pure data
+  microsandbox_adapter.py   profile -> Sandbox.create kwargs; the only SDK-aware module
+  profiles.py               built-in profiles + TOML loading
+  session.py                AgentSession, open_session, launch_detached, list/destroy
+  cli.py                    typer entry point (`agentbox`): run, up, ls, down, profiles, show
+  errors.py                 agentboxError hierarchy
+Dockerfile                  the agent-box image; entrypoint.sh, mise/, start-dockerd.sh and
+                            docker-entrypoint.sh go with it
+tests/
+  fakes.py                  test doubles for the microsandbox SDK
+  conftest.py               fixtures + integration-test gating
 ```
 
-On macOS and Linux, restrict who can read it:
+`config.py` imports nothing from microsandbox, so profiles can be loaded, validated and
+printed without the SDK. The SDK is imported lazily, only once a sandbox is actually
+booted — which is why `agentbox version`, `agentbox profiles` and `agentbox show` start fast.
 
-```bash
-chmod 600 ~/.config/agent-box/env
-```
+## References
 
-**Don't mount these into the container.** Doing so undoes the isolation:
-
-- `~/.ssh`: gives access to every server and repo your keys can reach.
-- `~/.aws`, `~/.config/gcloud`, `~/.azure`, `~/.kube`, and similar: cloud credentials.
-- The host's own agent config folders (`~/.claude`, `~/.codex`, …): this mixes host and container state. On macOS, logins are stored in the Keychain anyway, so it wouldn't log you in.
-- Your whole home folder or drive (`~`, `/Users`, `C:\`).
-
-If you need git push, use HTTPS with a fine-grained token that's limited to the repos you want, e.g. via `GH_TOKEN` + `gh auth setup-git` (`gh` is always installed).
-
----
-
-## Platform notes
-
-### macOS
-
-- **OrbStack** is the fastest option and adds the `*.orb.local` hostnames. Docker Desktop, Colima and Rancher Desktop work too.
-- File ownership is handled automatically. Files the agents create show up as owned by your Mac user, so you don't need the UID build args.
-
-### Windows
-
-- **Recommended: use WSL2.** Keep your projects inside the WSL filesystem (e.g. `~/code` in Ubuntu, not `/mnt/c/...`), and use the bash `agentbox` launcher from a WSL shell. Bind mounts from `C:\` work, but they're much slower, and file watching (hot reload) is often unreliable.
-- **PowerShell:** `agentbox.ps1` works with Docker Desktop or Podman Desktop and mounts the current folder (`C:\...`) directly. Expect the same slower file access as above.
-- **Git Bash / MSYS:** not recommended, because it rewrites paths in `-v` arguments. If you must, prefix commands with `MSYS_NO_PATHCONV=1`.
-- **Line endings:** files with Windows line endings (CRLF) break the bash launcher and the Dockerfile's shell steps. The included `.gitattributes` prevents this if you keep these files in git. Otherwise, save them with LF line endings.
-
-### Linux
-
-- **File ownership:** build with `--build-arg USER_UID=$(id -u) --build-arg USER_GID=$(id -g)` (see step 3). Otherwise, files created in your project will belong to UID 1000.
-- **Rootless Podman:** use `AGENTBOX_ENGINE=podman` and `AGENTBOX_OPTS="--userns=keep-id"` so files map to your user.
-- **SELinux** (Fedora, RHEL): if you get "permission denied" on the project mount, add `AGENTBOX_OPTS="--security-opt label=disable"`.
-
----
-
-## Optional mounts
-
-Pass these via `AGENTBOX_OPTS`, or edit the launcher if you want them permanently.
-
-**Share your host git config, read-only:**
-
-```
--v ~/.gitconfig:/home/agent-box/.gitconfig:ro
-```
-
-(If you do this, skip the `git config --global` step above, since the file is read-only.)
-
-**Keep the container's `node_modules` separate from the host** (recommended for JS projects):
-
-```
--v agent-box-nm-my-app:/workspace/my-app/node_modules
-```
-
-Native npm packages built in the Linux container won't run on macOS or Windows, and the reverse is also true. This puts the container's `node_modules` in its own volume, one per project. On slow bind mounts (Windows, Docker Desktop) installs also run much faster. The same idea works for `.venv` (Python) or `target` (Rust).
-
-**Reference material, read-only:**
-
-```
--v ~/code/shared-docs:/ref/shared-docs:ro
-```
-
-Use `:ro` for anything the agents should read but never change.
-
----
-
-## Updating
-
-**Agents:** most of them update themselves inside the volume. To update by hand, run the agent's own update command inside the container, e.g. `claude update`, `opencode update`, `npm update -g`.
-
-**Image** (after editing the `Dockerfile`, e.g. to add apt packages or another agent):
-
-```bash
-docker build -t agent-box .
-docker build --target docker -t agent-box:docker .   # if you use Docker mode
-```
-
-**Toolchains from presets** are pinned to exact versions. To update, raise the versions in `mise/*.toml` and rebuild the image; the new versions install on the next start. `mise outdated --bump` inside the container lists what's newer, and `mise prune` removes old versions from the volume.
-
-**apt packages** are pinned to exact versions in the `Dockerfile`. Debian packages come from the [snapshot.debian.org](https://snapshot.debian.org) date that the pinned `debian:trixie` image names, so they build the same every time. To update, bump the image digest, then read the new versions inside a container (`apt-cache policy <package>`) and put them in the pins. PHP (Sury) is the exception: it has no snapshot, keeps only its newest builds and publishes amd64 and arm64 days apart, so only the PHP minor (`PHP_VERSION`) is pinned and each build gets Sury's newest packages. Rebuild the PHP image to pick up a new PHP patch release.
-
-To pick up the newest mise and Composer releases without changing the Dockerfile, add `--pull --no-cache`. Otherwise Docker reuses the cached base images and layers:
-
-```bash
-docker build --pull --no-cache -t agent-box .
-```
-
-> **Important:** `/home/agent-box` comes from the **volume**, which was filled from the image only on its first use. System packages (`apt`, mise, PHP, Composer) update when you rebuild after changing them. But an agent you **add** to the Dockerfile later is installed into `/home/agent-box` in the image, so it won't appear in an existing volume.
->
-> To get it, either install it once inside a running container (same command as in the Dockerfile), or reset the volume (see below) and log in again.
-
----
-
-## Managing the volume
-
-```bash
-docker volume ls                   # list volumes
-docker volume inspect agent-box-home   # details
-```
-
-**Back it up** (run in the folder where the backup should go; in PowerShell use `${PWD}`):
-
-```bash
-docker run --rm -v agent-box-home:/data -v "$PWD":/backup debian:trixie tar czf /backup/agent-box-home.tgz -C /data .
-```
-
-**Restore:**
-
-```bash
-docker run --rm -v agent-box-home:/data -v "$PWD":/backup debian:trixie tar xzf /backup/agent-box-home.tgz -C /data
-```
-
-**Reset it** (refills from the image on the next run; you'll have to log in again):
-
-```bash
-docker volume rm agent-box-home
-```
-
-**Remove per-project `node_modules` volumes:**
-
-```bash
-docker volume ls -q | grep '^agent-box-nm-' | xargs docker volume rm
-```
-
-**Remove Docker-mode volumes** (cached images and stack data). They can get large:
-
-```bash
-docker system df -v | grep agent-box-docker-                              # see sizes
-docker volume ls -q | grep '^agent-box-docker-' | xargs docker volume rm  # remove all
-```
-
----
-
-## What this does and doesn't protect
-
-**Protected:**
-
-- The rest of your filesystem.
-- SSH keys, OS keychain and cloud credentials.
-- Other projects.
-- The host OS itself: `sudo` inside the container only affects the container.
-
-**Not protected:**
-
-- **The project folder.** It's mounted read-write, so commit or stash before letting an agent loose.
-- **The network.** The container has full outbound internet access and can reach services on your LAN. It can usually also reach services on your host, via `host.docker.internal` or `host.orb.internal`.
-- **Anything you pass in** via the env file or extra mounts.
-- **The shared `agent-box-home` volume.** It's shared across projects, so one project's session can read another project's agent history.
-- **Docker mode.** With `-d` the container is privileged, so most of the protection above no longer holds. See [Security trade-off](#security-trade-off).
-
-If you want a stricter setup, use a separate home volume per project or client, e.g. `AGENTBOX_HOME_VOLUME=agent-box-home-clientA`. The trade-off is that you'll have to log in once per volume.
-
----
-
-## Troubleshooting
-
-| Problem | Fix |
-|---|---|
-| `the input device is not a TTY` | The launcher needs an interactive terminal. On Windows with mintty/Git Bash, use Windows Terminal, PowerShell or WSL instead. |
-| `Conflict. The container name "/agent-box-code-my-app" is already in use` | That project already has a running container. Use `docker exec -it agent-box-code-my-app bash` instead. |
-| An agent's command isn't found | It was added to the Dockerfile after the volume was created. Install it inside the container, or reset the volume. |
-| Permission denied in `/workspace/...` (Linux) | Rebuild with your UID/GID build args. With rootless Podman, use `--userns=keep-id`. With SELinux, use `--security-opt label=disable`. |
-| Permission denied in `/home/agent-box` | The volume was created by a different image or user. Reset it. |
-| `bash\r: No such file or directory` | CRLF line endings. Convert `agentbox` and `Dockerfile` to LF. |
-| Login URL won't complete | Copy the full URL into your host browser, then paste the code it shows back into the container's terminal. Or use API keys in the env file. |
-| Dev server not reachable | It must listen on `0.0.0.0`. Outside OrbStack, also publish the port with `-p`. |
-| `agent-box: the Docker daemon didn't start` | The container isn't privileged. Start it with `agentbox -d` rather than `docker run agent-box:docker` directly. Details are in `/tmp/dockerd.log` inside the sandbox. |
-| `docker: command not found` in Docker mode | The `agent-box:docker` image is missing or outdated. Run `docker build --target docker -t agent-box:docker .` |
-| Inner stack not reachable from your machine | Inside the sandbox use `localhost`. From your machine, use `agent-box-<parent>-<project>.orb.local` (OrbStack), or publish the port with `AGENTBOX_OPTS="-p 9000:9000"`. |
-| `php: command not found` | PHP is only in the [PHP image](#php-image). Build it and start with `agentbox --php`. |
-| `mise ERROR No version is set for shim: go` (or java, …) | That tool was installed by a preset you didn't select this time. Start with `agentbox -p go`, or add it to the project's `mise.toml`. |
-| `Code coverage driver not available. Did you install Xdebug or PCOV?` | Xdebug isn't loaded by default. Run `with-xdebug php artisan test --coverage`, or see [Xdebug](#3-build-the-image) for a whole session. |
-| Two projects with the same folder name | They'd get the same container name and history path. Rename one folder. |
+- [microsandbox docs](https://docs.microsandbox.dev)
+- [Python SDK reference](https://docs.microsandbox.dev/sdk/python/sandbox)

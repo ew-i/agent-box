@@ -1,0 +1,48 @@
+# The sample `dev` profile of this repo; `make start` boots it. Copy it to
+# $XDG_CONFIG_HOME/agentbox/profiles.toml (default ~/.config/agentbox/). Read by `agentbox`,
+# never written by it.
+#
+# The OpenRouter key never goes into this file. agentbox reads it from the environment when
+# the sandbox boots; `make start` loads it from ~/.config/agentbox/.env (one line,
+# OPENROUTER_API_KEY=sk-or-...). Create that file once per machine, then `chmod 600` it.
+
+[profiles.dev]
+description = "PHP, Python, Node (yarn, pnpm), Docker, Claude Code, opencode; allowlisted network."
+image = "agent-box:php-docker"
+cpus = 4
+memory_mib = 4096
+named_volumes = { "/home/agent-box" = "agent-box-home" }
+# Docker can't keep its data on the microVM's overlayfs root; this disk belongs to one sandbox.
+disks = { "/var/lib/docker" = 20480 }
+setup_script = "agent-box-entrypoint agent-box-start-dockerd"
+
+# The guest only sees a placeholder. microsandbox swaps in the real key in the Authorization
+# header of requests to openrouter.ai and blocks the placeholder everywhere else.
+secrets = { OPENROUTER_API_KEY = { hosts = ["openrouter.ai"] } }
+
+# HTTPS (port 443) to these domains only. A leading dot means "and all subdomains".
+network = "allowlist"
+allowed_domains = [
+    # Claude Code: API, login, telemetry, self-updates
+    ".anthropic.com", ".claude.ai", "storage.googleapis.com", "platform.claude.com",
+    # opencode: self-updates, model catalogue, OpenRouter
+    ".opencode.ai", "models.dev", "openrouter.ai",
+    # GitHub: git over HTTPS, API, release downloads (mise tools, Composer dists)
+    ".github.com", ".githubusercontent.com",
+    # mise: Node.js builds, version metadata, Sigstore to verify downloads (uv fails without)
+    "nodejs.org", ".jdx.dev", ".sigstore.dev",
+    # Python: PyPI index and files (pip, uv)
+    ".pypi.org", ".pythonhosted.org",
+    # Node: npm registry (npm, pnpm, corepack), Yarn
+    ".npmjs.org", ".yarnpkg.com",
+    # PHP: Packagist and Composer itself
+    ".packagist.org", "getcomposer.org",
+    # Container registries: Docker Hub, GitHub, Quay, Microsoft
+    ".docker.io", ".docker.com", "ghcr.io", ".quay.io", ".mcr.microsoft.com",
+]
+
+[profiles.dev.env]
+# Presets from mise/: Python 3.14 + uv, corepack (yarn, pnpm) + bun. Node.js is always on.
+MISE_ENV = "python,node"
+# opencode's default model. Loaded after ~/.config/opencode/opencode.json, so it wins.
+OPENCODE_CONFIG_CONTENT = '{"model": "openrouter/openai/gpt-6-luna"}'

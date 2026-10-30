@@ -1,0 +1,106 @@
+[build-system]
+requires = ["hatchling==1.33.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agentbox"
+version = "0.1.0"
+description = "Sandboxed execution environments for coding agents, backed by microsandbox microVMs."
+readme = "README.md"
+requires-python = ">=3.11"
+keywords = ["sandbox", "microvm", "coding-agent", "microsandbox", "isolation"]
+dependencies = [
+    "microsandbox==0.7.11",
+    "pydantic==2.14.1",
+    "typer==0.27.3",
+]
+
+[project.scripts]
+agentbox = "agentbox.cli:main"
+
+[project.urls]
+Homepage = "https://microsandbox.dev/"
+Documentation = "https://docs.microsandbox.dev/sdk/python/sandbox"
+
+[dependency-groups]
+dev = [
+    "genbadge[coverage]==1.1.3",
+    "mypy==2.4.1",
+    "pytest==9.2.0",
+    "pytest-asyncio==1.4.1",
+    "pytest-cov==7.1.0",
+    "ruff==0.17.3",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agentbox"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/agentbox", "tests", "README.md"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "N",    # pep8-naming
+    "UP",   # pyupgrade
+    "B",    # flake8-bugbear
+    "A",    # flake8-builtins
+    "C4",   # flake8-comprehensions
+    "SIM",  # flake8-simplify
+    "TCH",  # flake8-type-checking
+    "PTH",  # flake8-use-pathlib
+    "RUF",  # ruff-specific
+]
+ignore = [
+    "B008",  # typer uses function calls (Option/Argument) in defaults
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["TC"]
+"src/agentbox/cli.py" = ["TC"]      # typer resolves annotations at runtime
+
+[tool.ruff.lint.flake8-type-checking]
+runtime-evaluated-base-classes = ["pydantic.BaseModel"]
+
+[tool.ruff.format]
+docstring-code-format = true
+
+[tool.mypy]
+python_version = "3.11"
+packages = ["agentbox"]
+mypy_path = "src"
+strict = true
+warn_unreachable = true
+
+[[tool.mypy.overrides]]
+module = ["microsandbox.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers -m 'not integration' --cov=agentbox --cov-report=term-missing"
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+markers = [
+    "integration: tests that boot a real microsandbox microVM (deselect with '-m \"not integration\"')",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["agentbox"]
+
+[tool.coverage.report]
+fail_under = 100
+show_missing = true
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "if __name__ == .__main__.:",
+]

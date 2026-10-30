@@ -1,7 +1,3 @@
-# agent-box: a disposable Linux workspace for terminal coding agents.
-# Works with any Docker-compatible engine: OrbStack, Docker Desktop, Podman,
-# Colima, Rancher Desktop, or Docker Engine on Linux.
-
 ARG COMPOSER_VERSION=2
 ARG MISE_VERSION=2026.10
 ARG DOCKER_BASE=base
@@ -30,21 +26,26 @@ RUN sed -i -E 's|^# (http://snapshot\.debian\.org/.+)$|URIs: \1\nCheck-Valid-Unt
 # MISE_ENV (e.g. MISE_ENV=java,go); a project's own mise.toml overrides both
 # once you `mise trust` it. No MISE_TRUSTED_CONFIG_PATHS or MISE_YES: either
 # would let a cloned repo's mise.toml run code just by being opened.
-COPY --from=mise /usr/local/bin/mise /usr/local/bin/mise
-COPY mise/ /etc/mise/
-COPY entrypoint.sh /usr/local/bin/agent-box-entrypoint
-RUN chmod 755 /usr/local/bin/agent-box-entrypoint
-# corepack (node preset) would otherwise ask before downloading yarn/pnpm and hang agents
-ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 
 # Non-root user with passwordless sudo (sudo only affects the container).
 # On native Linux, pass your own IDs so project files stay owned by you:
 #   docker build --build-arg USER_UID=$(id -u) --build-arg USER_GID=$(id -g) -t agent-box .
+# Login shells (bash -l) reset PATH via /etc/profile, so set it there too (keep in
+# sync with ENV PATH below). /etc/profile.d rather than ~/.profile, so it also
+# reaches existing home volumes.
 ARG USER_UID=1000
 ARG USER_GID=1000
 RUN groupadd -o -g "$USER_GID" agent-box \
  && useradd -o -m -s /bin/bash -u "$USER_UID" -g "$USER_GID" agent-box \
- && echo "agent-box ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/agent-box
+ && echo "agent-box ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/agent-box \
+ && echo 'export PATH="$HOME/.local/bin:$HOME/.opencode/bin:$HOME/.config/composer/vendor/bin:$HOME/.local/share/mise/shims:$PATH"' \
+      > /etc/profile.d/agent-box.sh
+
+COPY --from=mise /usr/local/bin/mise /usr/local/bin/mise
+COPY mise/ /etc/mise/
+COPY --chmod=755 entrypoint.sh /usr/local/bin/agent-box-entrypoint
+# corepack (node preset) would otherwise ask before downloading yarn/pnpm and hang agents
+ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 USER agent-box
 
 # Everything the user installs (agents, npm globals, uv tools, composer global
@@ -52,28 +53,33 @@ USER agent-box
 # and agents can self-update.
 ENV NPM_CONFIG_PREFIX=/home/agent-box/.local \
     PATH=/home/agent-box/.local/bin:/home/agent-box/.opencode/bin:/home/agent-box/.config/composer/vendor/bin:/home/agent-box/.local/share/mise/shims:$PATH
-# Login shells (bash -l) reset PATH via /etc/profile, so set it there too.
-# /etc/profile.d rather than ~/.profile, so it also reaches existing home volumes.
-RUN echo 'export PATH="$HOME/.local/bin:$HOME/.opencode/bin:$HOME/.config/composer/vendor/bin:$HOME/.local/share/mise/shims:$PATH"' \
-      | sudo tee /etc/profile.d/agent-box.sh >/dev/null
-# Node.js from /etc/mise/config.toml, so npm-based agents below can install
-RUN mise install
 
 # ---- Coding agents: keep the ones you want, comment out the rest ----
 
 # Pinned versions; both self-update at runtime into the home volume.
-ARG CLAUDE_CODE_VERSION=2.1.306
-ARG OPENCODE_VERSION=2.1.2
-ARG CODEX_VERSION=0.163.0
+ARG CLAUDE_CODE_VERSION=2.1.312
+ARG OPENCODE_VERSION=2.2.1
+ARG CODEX_VERSION=0.166.0
 ARG GEMINI_CLI_VERSION=0.64.0
+ARG GITHUB_COPILOT_VERSION=1.0.105
+# One layer for the whole home, so the download caches deleted at the end never
+# reach the image. Bumping any version above reinstalls all of it.
+# Node.js from /etc/mise/config.toml comes first, so the npm-based agents can install.
+# A microsandbox named volume starts empty and hides this home, so the last step
+# keeps a copy for the entrypoint to seed a new home volume from.
+RUN mise install \
 # Claude Code
-RUN curl -fsSL https://claude.ai/install.sh | bash -s "$CLAUDE_CODE_VERSION"
+ && curl -fsSL https://claude.ai/install.sh | bash -s "$CLAUDE_CODE_VERSION" \
 # opencode
-RUN curl -fsSL https://opencode.ai/v2/install | bash -s -- --version "$OPENCODE_VERSION"
+ && curl -fsSL https://opencode.ai/v2/install | bash -s -- --version "$OPENCODE_VERSION" \
 # OpenAI Codex CLI
-# RUN npm install -g @openai/codex@"$CODEX_VERSION"
+# && npm install -g @openai/codex@"$CODEX_VERSION" \
 # Gemini CLI
-# RUN npm install -g @google/gemini-cli@"$GEMINI_CLI_VERSION"
+# && npm install -g @google/gemini-cli@"$GEMINI_CLI_VERSION" \
+# CoPilot CLI
+# && npm install -g @github/copilot@"$GITHUB_COPILOT_VERSION" \
+ && rm -rf "$HOME/.cache" "$HOME/.npm" \
+ && sudo cp -a "$HOME" /opt/agent-box-home
 
 WORKDIR /workspace
 ENTRYPOINT ["agent-box-entrypoint"]
@@ -81,7 +87,7 @@ CMD ["bash"]
 
 # ---- Optional: PHP + Composer ----
 # Build with:  docker build --target php -t agent-box:php .
-# Run with:    agentbox --php
+# Boot with:   a user profile that sets image = "agent-box:php" (see README)
 # PHP stays apt-based (Sury) instead of a mise preset: mise only builds PHP from
 # source, which is slow and needs dozens of -dev packages.
 FROM base AS php
@@ -100,26 +106,24 @@ RUN curl -fsSLo /tmp/debsuryorg-archive-keyring.deb https://packages.sury.org/de
       php${PHP_VERSION}-intl php${PHP_VERSION}-mbstring php${PHP_VERSION}-mysql \
       php${PHP_VERSION}-readline php${PHP_VERSION}-sqlite3 php${PHP_VERSION}-xml php${PHP_VERSION}-zip \
       php${PHP_VERSION}-imagick php${PHP_VERSION}-redis php${PHP_VERSION}-xdebug \
- && rm -rf /var/lib/apt/lists/*
-COPY --from=composer /usr/bin/composer /usr/local/bin/composer
-
+ && rm -rf /var/lib/apt/lists/* \
 # Xdebug is installed but not loaded by default: just loading it makes PHP
 # ~60% slower even with xdebug.mode=off. Load it on demand from
 # /etc/php/xdebug.d, for one command with `with-xdebug php artisan test --coverage`,
 # or for a whole session with PHP_INI_SCAN_DIR=:/etc/php/xdebug.d (see README).
-RUN phpdismod -v "$PHP_VERSION" -s cli xdebug \
+ && phpdismod -v "$PHP_VERSION" -s cli xdebug \
  && mkdir -p /etc/php/xdebug.d \
- && printf 'zend_extension=xdebug.so\nxdebug.mode=coverage\nxdebug.client_host=host.docker.internal\n' \
+ && printf 'zend_extension=xdebug.so\nxdebug.mode=coverage\n' \
       > /etc/php/xdebug.d/xdebug.ini \
  && printf '#!/bin/sh\n# Run a command with Xdebug loaded (default mode: coverage; override with XDEBUG_MODE)\nexport PHP_INI_SCAN_DIR=":/etc/php/xdebug.d"\nexec "$@"\n' \
       > /usr/local/bin/with-xdebug \
  && chmod 755 /usr/local/bin/with-xdebug
+COPY --from=composer /usr/bin/composer /usr/local/bin/composer
 USER agent-box
 
 # ---- Optional: Docker inside the sandbox ----
 # Build with:  docker build --target docker -t agent-box:docker .
 #   with PHP:  docker build --target docker --build-arg DOCKER_BASE=php -t agent-box:php-docker .
-# Run with:    agentbox -d   (needs --privileged, see README)
 FROM ${DOCKER_BASE} AS docker
 USER root
 RUN install -m 0755 -d /etc/apt/keyrings \
@@ -132,8 +136,8 @@ RUN install -m 0755 -d /etc/apt/keyrings \
       iptables=1.8.11-2 \
  && rm -rf /var/lib/apt/lists/* \
  && usermod -aG docker agent-box
-COPY docker-entrypoint.sh /usr/local/bin/agent-box-docker-entrypoint
-RUN chmod 755 /usr/local/bin/agent-box-docker-entrypoint
+COPY --chmod=755 start-dockerd.sh /usr/local/bin/agent-box-start-dockerd
+COPY --chmod=755 docker-entrypoint.sh /usr/local/bin/agent-box-docker-entrypoint
 USER agent-box
 ENTRYPOINT ["agent-box-entrypoint", "agent-box-docker-entrypoint"]
 CMD ["bash"]

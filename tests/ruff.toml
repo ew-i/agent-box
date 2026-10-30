@@ -1,0 +1,3 @@
+# Tests get a longer limit so given/when/then names fit on one line.
+extend = "../pyproject.toml"
+line-length = 180
