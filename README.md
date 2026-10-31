@@ -47,6 +47,37 @@ uv sync
 uv run agentbox profiles
 ```
 
+### From any project folder
+
+`uv run` only finds `agentbox` inside this checkout. To run it from the project you're working
+on, install it as a uv tool, once, from the checkout:
+
+```bash
+uv tool install --editable . --with-executables-from microsandbox
+```
+
+This puts `agentbox` and the bundled `msb` in `~/.local/bin`. The install is editable, so
+a `git pull` here takes effect at once. After a dependency change, run the command again
+with `--reinstall`. Then, in a Java or Go repo:
+
+```bash
+cd ~/code/my-app
+agentbox up dev --name my-app -w .
+msb exec my-app -- bash -l
+agentbox down my-app
+```
+
+`-w .` is resolved to an absolute path before the box boots. The rest of this README writes
+`uv run agentbox`; with the tool installed, drop the `uv run`.
+
+A tool doesn't read the `--env-file` that `uv run` loads. To keep secrets in
+`~/.config/agentbox/.env`, wrap the command in your shell's rc file. The subshell keeps
+the keys out of your interactive shell:
+
+```bash
+agentbox() { (set -a; [ -f ~/.config/agentbox/.env ] && . ~/.config/agentbox/.env; command agentbox "$@") }
+```
+
 ## Usage
 
 One-shot — boot, run, tear down:
