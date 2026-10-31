@@ -1,9 +1,12 @@
-# The `dev` box from ~/.config/agentbox/profiles.toml. Pick the project to mount, e.g.
-#   make start WORKSPACE=~/code/my-app
-NAME ?= dev
-# Required: mount one project. The agent can write to it, .git hooks included, which run on the
-# host. READONLY=1 mounts it read-only, which even root in the box can't undo.
-WORKSPACE ?= $(error set WORKSPACE, e.g. make start WORKSPACE=~/code/my-app)
+# The `dev` box from ~/.config/agentbox/profiles.toml, for the project you're in. Needs the
+# global install (see README), then from any project:
+#   make -f ~/code/agent-box/Makefile start
+# or with `alias box='make -f ~/code/agent-box/Makefile'`: box start, box exec, ...
+NAME ?= $(notdir $(CURDIR))
+# The project to mount, by default the folder you run make from. The agent can write to it,
+# .git hooks included, which run on the host. READONLY=1 mounts it read-only, which even root
+# in the box can't undo.
+WORKSPACE ?= $(CURDIR)
 READONLY ?=
 # Optional: loaded when it exists, e.g. one line OPENROUTER_API_KEY=sk-or-... (chmod 600 it).
 ENV_FILE ?= $(HOME)/.config/agentbox/.env
@@ -11,10 +14,10 @@ ENV_FILE ?= $(HOME)/.config/agentbox/.env
 .PHONY: start exec stop del
 
 start:
-	uv run $(if $(wildcard $(ENV_FILE)),--env-file $(ENV_FILE)) agentbox up dev --name $(NAME) -w $(WORKSPACE) $(if $(READONLY),--readonly)
+	$(if $(wildcard $(ENV_FILE)),set -a; . $(ENV_FILE); set +a;) agentbox up dev --name $(NAME) -w $(WORKSPACE) $(if $(READONLY),--readonly)
 exec:
-	uv run msb exec $(NAME) -- /bin/bash
+	msb exec $(NAME) -- /bin/bash
 stop:
-	uv run msb stop $(NAME)
+	msb stop $(NAME)
 del:
-	uv run agentbox down $(NAME)
+	agentbox down $(NAME)
