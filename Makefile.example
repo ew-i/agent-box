@@ -14,10 +14,10 @@ ENV_FILE ?= $(HOME)/.config/agentbox/.env
 .PHONY: start exec stop del
 
 start:
-	$(if $(wildcard $(ENV_FILE)),set -a; . $(ENV_FILE); set +a;) agentbox up dev --name $(NAME) -w $(WORKSPACE) $(if $(READONLY),--readonly)
+	$(if $(wildcard $(ENV_FILE)),set -a; . '$(ENV_FILE)'; set +a;) agentbox up dev --name '$(NAME)' -w '$(WORKSPACE)' $(if $(READONLY),--readonly)
 exec:
-	msb exec $(NAME) -- /bin/bash
+	msb exec '$(NAME)' -- /bin/bash
 stop:
-	msb stop $(NAME)
+	agentbox stop '$(NAME)'
 del:
-	agentbox down $(NAME)
+	agentbox down '$(NAME)'

@@ -8,6 +8,7 @@ expects is the job of :mod:`agentbox.microsandbox_adapter`.
 
 from __future__ import annotations
 
+import posixpath
 from enum import StrEnum
 from pathlib import Path, PurePosixPath
 from typing import Annotated, Self
@@ -160,6 +161,15 @@ class AgentProfile(BaseModel):
             raise ValueError(
                 f"allow_private_dns only applies to network = 'allowlist', not '{self.network}'"
             )
+        return self
+
+    @model_validator(mode="after")
+    def _mount_paths_are_unique(self) -> Self:
+        paths = [*self.named_volumes, *self.disks]
+        if self.workspace is not None:
+            paths.append(self.workspace.guest_path)
+        if len(paths) != len({posixpath.normpath(path) for path in paths}):
+            raise ValueError("named volumes, disks and workspace must use different guest paths")
         return self
 
     def required_directories(self) -> list[str]:

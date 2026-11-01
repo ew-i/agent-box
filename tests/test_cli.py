@@ -262,6 +262,18 @@ def test_given_the_home_folder_when_running_then_refuses_to_mount_it(recorder: R
     assert recorder.profiles == []
 
 
+def test_given_a_volume_at_the_workspace_path_when_running_with_a_workspace_then_refuses(tmp_path: Path, recorder: Recorder) -> None:
+    """Flags must pass the same profile checks as the config file."""
+    config = tmp_path / "profiles.toml"
+    config.write_text('[profiles.mine]\nnamed_volumes = { "/workspace" = "vol" }\n', encoding="utf-8")
+
+    result = runner.invoke(main, ["run", "mine", "ls", "--workspace", str(tmp_path), "--config", str(config)])
+
+    assert result.exit_code == 2
+    assert "must use different guest paths" in " ".join(click.unstyle(result.output).replace("│", " ").split())
+    assert recorder.profiles == []
+
+
 def test_given_a_network_flag_when_running_then_overrides_the_network(recorder: Recorder) -> None:
     result = runner.invoke(main, ["run", "airgapped", "ls", "--network", "public"])
 
@@ -508,6 +520,47 @@ def test_given_a_startup_failure_when_bringing_up_then_reports_it(monkeypatch: p
     assert "no kvm" in result.stderr
 
 
+@pytest.fixture
+def restarter(monkeypatch: pytest.MonkeyPatch) -> list[tuple[Any, str, bool]]:
+    started: list[tuple[Any, str, bool]] = []
+
+    async def fake_profile(name: str) -> str:
+        return "agent-box-php-docker"
+
+    async def fake_launch(profile: Any, name: str, *, existing: bool = False) -> bool:
+        started.append((profile, name, existing))
+        return True
+
+    monkeypatch.setattr("agentbox.cli.created_profile", fake_profile)
+    monkeypatch.setattr("agentbox.cli.launch_detached", fake_launch)
+    return started
+
+
+def test_given_a_stopped_box_when_starting_it_then_restarts_it_with_its_own_profile(restarter: list[tuple[Any, str, bool]]) -> None:
+    result = runner.invoke(main, ["start", "my-app"])
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout == "my-app\n"
+    [(profile, name, existing)] = restarter
+    assert (profile.name, name, existing) == ("agent-box-php-docker", "my-app", True)
+    assert profile.setup_script == "agent-box-entrypoint agent-box-start-dockerd"
+    assert "msb exec my-app" in result.stderr
+
+
+def test_given_a_box_whose_profile_is_gone_when_starting_it_then_exits_with_2(monkeypatch: pytest.MonkeyPatch, restarter: list[tuple[Any, str, bool]]) -> None:
+    async def fake_profile(name: str) -> str:
+        return "deleted"
+
+    monkeypatch.setattr("agentbox.cli.created_profile", fake_profile)
+    result = runner.invoke(main, ["start", "my-app"])
+
+    assert result.exit_code == 2
+    stderr = " ".join(result.stderr.split())
+    assert "unknown profile 'deleted'" in stderr
+    assert "pass the --config it was brought up with" in stderr
+    assert restarter == []
+
+
 def test_given_sandboxes_when_listing_then_renders_a_row_each(monkeypatch: pytest.MonkeyPatch) -> None:
     async def fake_list() -> list[SandboxInfo]:
         return [SandboxInfo("a", "running", "python"), SandboxInfo("b", "stopped", None)]
@@ -541,6 +594,32 @@ def test_given_a_runtime_failure_when_listing_then_reports_it(monkeypatch: pytes
 
     assert result.exit_code == 2
     assert "runtime down" in result.stderr
+
+
+@pytest.mark.parametrize(("args", "force"), [([], False), (["--force"], True)])
+def test_given_a_running_box_when_stopping_it_then_keeps_it_for_start(monkeypatch: pytest.MonkeyPatch, args: list[str], force: bool) -> None:
+    stopped: list[tuple[str, bool]] = []
+
+    async def fake_stop(name: str, *, force: bool = False) -> None:
+        stopped.append((name, force))
+
+    monkeypatch.setattr("agentbox.cli.stop_sandbox", fake_stop)
+    result = runner.invoke(main, ["stop", "my-app", *args])
+
+    assert result.exit_code == 0
+    assert stopped == [("my-app", force)]
+    assert "agentbox start my-app" in result.stderr
+
+
+def test_given_a_runtime_failure_when_stopping_then_exits_with_2(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def boom(name: str, *, force: bool = False) -> None:
+        raise SandboxOperationError("not running")
+
+    monkeypatch.setattr("agentbox.cli.stop_sandbox", boom)
+    result = runner.invoke(main, ["stop", "my-app"])
+
+    assert result.exit_code == 2
+    assert "not running" in result.stderr
 
 
 def test_given_the_force_flag_when_tearing_down_then_removes_the_sandbox(monkeypatch: pytest.MonkeyPatch) -> None:

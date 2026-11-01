@@ -180,6 +180,13 @@ def test_given_malformed_toml_when_loading_profiles_then_raises_config_error(con
     assert str(config_file) in str(excinfo.value)
 
 
+def test_given_invalid_utf8_when_loading_profiles_then_raises_config_error(config_file: Path) -> None:
+    config_file.write_bytes(b"\xff")
+
+    with pytest.raises(ProfileConfigError, match="utf-8"):
+        load_profiles(config_file)
+
+
 def test_given_an_invalid_field_value_when_loading_profiles_then_names_the_field(config_file: Path) -> None:
     config_file.write_text("[profiles.rust]\ncpus = 999\n", encoding="utf-8")
 

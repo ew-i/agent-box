@@ -78,6 +78,16 @@ def test_given_a_relative_workdir_when_creating_a_profile_then_rejects_it() -> N
         AgentProfile(name="lost", workdir="work")
 
 
+@pytest.mark.parametrize("guest_path", ["/var/lib/docker", "/var/lib/docker/"])
+def test_given_a_workspace_and_disk_at_the_same_guest_path_when_creating_a_profile_then_rejects_them(tmp_path: Path, guest_path: str) -> None:
+    with pytest.raises(ValidationError, match="different guest paths"):
+        AgentProfile(
+            name="collision",
+            disks={"/var/lib/docker": 20_480},
+            workspace=WorkspaceMount(host_path=tmp_path, guest_path=guest_path),
+        )
+
+
 def alias(path: Path) -> object:
     """A second name for a folder above home, which only some filesystems have."""
     return pytest.param(path, marks=pytest.mark.skipif(not path.exists(), reason=f"no {path} on this filesystem"))

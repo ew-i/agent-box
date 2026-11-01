@@ -16,6 +16,17 @@ if [[ -f /sys/fs/cgroup/cgroup.controllers ]]; then
   ' 2>/dev/null || true
 fi
 
+# A restarted box (`agentbox start`) keeps its root filesystem, pid files included, and
+# after the reboot their PIDs belong to other processes: dockerd then refuses to start.
+# Drop a pid file unless its process really is the daemon it names.
+drop_stale_pidfile() {
+  local file=$1 name=$2 pid
+  pid="$(sudo cat "$file" 2>/dev/null)" || return 0
+  [[ "$(cat "/proc/$pid/comm" 2>/dev/null)" == "$name" ]] || sudo rm -f "$file"
+}
+drop_stale_pidfile /var/run/docker.pid dockerd
+drop_stale_pidfile /var/run/docker/containerd/containerd.pid containerd
+
 # setsid: a microsandbox setup script ends with its session, dockerd must outlive it
 sudo setsid dockerd >/tmp/dockerd.log 2>&1 &
 for _ in $(seq 1 30); do

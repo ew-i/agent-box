@@ -9,11 +9,13 @@ from microsandbox import SandboxAlreadyExistsError, SandboxStillRunningError
 from agentbox.errors import SandboxOperationError, SandboxStartupError
 from agentbox.session import (
     AgentSession,
+    created_profile,
     destroy_sandbox,
     generate_name,
     launch_detached,
     list_sandboxes,
     open_session,
+    stop_sandbox,
 )
 from fakes import ExecCall, FakeExecEvent, FakeHandle, FakeListing, FakeLookup, FakePage, FakeSandbox, FakeSandboxFactory
 
@@ -197,6 +199,63 @@ async def test_given_a_stopped_sandbox_with_other_settings_when_launching_detach
     assert runtime.restarts == []
 
 
+async def test_given_an_existing_sandbox_when_starting_it_then_skips_create_and_reruns_setup(profile: AgentProfile, runtime: FakeSandboxFactory) -> None:
+    """`agentbox start` after `msb stop`: boot the box as created, then start dockerd again."""
+    restarted = await launch_detached(profile.model_copy(update={"setup_script": "start-dockerd"}), "dev", existing=True)
+
+    assert restarted is True
+    assert runtime.names == []
+    assert runtime.restarts == [("dev", True)]
+    assert runtime.started.commands == ["start-dockerd"]
+    assert runtime.started.detached is True
+
+
+async def test_given_an_existing_sandbox_and_a_failing_setup_when_starting_it_then_stops_it(profile: AgentProfile, runtime: FakeSandboxFactory) -> None:
+    runtime.events = [FakeExecEvent("exited", code=1)]
+
+    with pytest.raises(SandboxStartupError, match="exited with 1"):
+        await launch_detached(profile.model_copy(update={"setup_script": "start-dockerd"}), "dev", existing=True)
+
+    assert runtime.started.stopped is True
+
+
+async def test_given_a_running_sandbox_when_starting_it_as_existing_then_raises_startup_error(profile: AgentProfile, runtime: FakeSandboxFactory) -> None:
+    runtime.restart_error = SandboxStillRunningError("already running")
+
+    with pytest.raises(SandboxStartupError, match="already running"):
+        await launch_detached(profile, "dev", existing=True)
+
+
+async def test_given_an_agentbox_sandbox_when_reading_its_profile_then_returns_the_label(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("microsandbox.Sandbox", FakeLookup(FakeHandle("dev", "stopped", {"agentbox.profile": "dev"})))
+
+    assert await created_profile("dev") == "dev"
+
+
+async def test_given_a_sandbox_without_a_profile_label_when_reading_its_profile_then_points_to_msb_start(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("microsandbox.Sandbox", FakeLookup(FakeHandle("other", "stopped", {})))
+
+    with pytest.raises(SandboxStartupError, match="msb start other"):
+        await created_profile("other")
+
+
+async def test_given_unreadable_labels_when_reading_its_profile_then_reports_the_real_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A runtime failure must not pass for a box `agentbox up` didn't make."""
+    handle = FakeHandle("dev", "stopped", {"agentbox.profile": "dev"})
+    handle.config_error = RuntimeError("runtime down")
+    monkeypatch.setattr("microsandbox.Sandbox", FakeLookup(handle))
+
+    with pytest.raises(SandboxOperationError, match="could not read sandbox 'dev': runtime down"):
+        await created_profile("dev")
+
+
+async def test_given_an_unknown_sandbox_when_reading_its_profile_then_raises_operation_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("microsandbox.Sandbox", FakeLookup(None, error=RuntimeError("not found")))
+
+    with pytest.raises(SandboxOperationError, match="not found"):
+        await created_profile("ghost")
+
+
 async def test_given_a_running_sandbox_of_that_name_when_starting_then_raises_startup_error(profile: AgentProfile, runtime: FakeSandboxFactory) -> None:
     runtime.error = SandboxAlreadyExistsError("exists")
     runtime.restart_error = SandboxStillRunningError("already running")
@@ -245,6 +304,34 @@ async def test_given_a_failing_runtime_when_listing_sandboxes_then_raises_operat
 
     with pytest.raises(SandboxOperationError, match="no runtime"):
         await list_sandboxes()
+
+
+async def test_given_no_force_flag_when_stopping_by_name_then_stops_gracefully(monkeypatch: pytest.MonkeyPatch) -> None:
+    handle = FakeHandle("a", "running", {})
+    monkeypatch.setattr("microsandbox.Sandbox", FakeLookup(handle))
+
+    await stop_sandbox("a")
+
+    assert handle.stopped_with == "stop"
+    assert handle.destroyed is None
+
+
+async def test_given_the_force_flag_when_stopping_by_name_then_kills_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    handle = FakeHandle("a", "running", {})
+    monkeypatch.setattr("microsandbox.Sandbox", FakeLookup(handle))
+
+    await stop_sandbox("a", force=True)
+
+    assert handle.stopped_with == "kill"
+
+
+async def test_given_a_failing_stop_when_stopping_by_name_then_raises_operation_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    handle = FakeHandle("a", "stopped", {})
+    handle.stop_error = RuntimeError("not running")
+    monkeypatch.setattr("microsandbox.Sandbox", FakeLookup(handle))
+
+    with pytest.raises(SandboxOperationError, match="could not stop sandbox 'a': not running"):
+        await stop_sandbox("a")
 
 
 async def test_given_no_force_flag_when_destroying_then_destroys_gracefully(monkeypatch: pytest.MonkeyPatch) -> None:

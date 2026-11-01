@@ -58,6 +58,8 @@ cd ~/code/my-app
 agentbox up agent-box --name my-app -w .
 msb exec my-app -- bash -l
 agentbox ls
+agentbox stop my-app                     # stop, keep state (like msb stop)
+agentbox start my-app                    # start again, rerun the setup script
 agentbox down my-app                     # stop + delete state
 ```
 
@@ -73,6 +75,10 @@ agentbox down "$BOX"
 you change the profile, workspace, `--readonly`, `--network`, or the profile's `network`,
 `allowed_domains`, `tls_bypass`, `secrets` or `named_volumes`; `agentbox down` it first.
 Rotated secrets and new time limits also only apply after `down`.
+
+`agentbox start NAME` does the same from just the name: it starts the stopped box as it was
+created (mounts, network, secrets) and reruns its profile's `setup_script`, which
+`msb start` skips.
 
 `show` prints the profile that would actually boot, with `env` values masked. It takes the
 same flags as `run` and `up`:
@@ -210,8 +216,8 @@ setup_script = "agent-box-entrypoint agent-box-start-dockerd"
 - `disks` gives `/var/lib/docker` its own sparse 20 GiB ext4 disk, because Docker can't run
   on the microVM's overlayfs root. It survives a stop; `agentbox down` deletes it.
 
-A box restarted with `msb start` skips `setup_script`; run
-`msb exec my-app -- agent-box-start-dockerd`.
+Restart a stopped box with `agentbox start my-app`, not `msb start`: `msb start` skips
+`setup_script`, so dockerd stays down (then run `msb exec my-app -- agent-box-start-dockerd`).
 
 ### Updating
 
@@ -335,7 +341,7 @@ src/agentbox/
   microsandbox_adapter.py   profile -> Sandbox.create kwargs; the only SDK-aware module
   profiles.py               built-in profiles + TOML loading
   session.py                AgentSession, open_session, launch_detached, list/destroy
-  cli.py                    typer entry point: run, up, ls, down, profiles, show
+  cli.py                    typer entry point: run, up, start, stop, ls, down, profiles, show
   errors.py                 AgentboxError hierarchy
 Dockerfile                  the agent-box image, with entrypoint.sh, mise/, start-dockerd.sh,
                             docker-entrypoint.sh

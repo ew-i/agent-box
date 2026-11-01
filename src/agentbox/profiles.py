@@ -110,7 +110,7 @@ def _read_user_profiles(config_path: Path) -> dict[str, AgentProfile]:
     """Parse and validate one config file, reporting every failure as a AgentboxError."""
     try:
         document = tomllib.loads(config_path.read_text(encoding="utf-8"))
-    except (OSError, tomllib.TOMLDecodeError) as exc:
+    except (OSError, UnicodeError, tomllib.TOMLDecodeError) as exc:
         raise ProfileConfigError(config_path, str(exc)) from exc
 
     try:

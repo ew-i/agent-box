@@ -110,11 +110,21 @@ class FakeHandle:
         self.labels = labels
         self.config_error: Exception | None = None
         self.destroyed: dict[str, Any] | None = None
+        self.stop_error: Exception | None = None
+        self.stopped_with: str | None = None
 
     def config(self) -> dict[str, Any]:
         if self.config_error is not None:
             raise self.config_error
         return {"labels": self.labels}
+
+    async def stop(self) -> None:
+        if self.stop_error is not None:
+            raise self.stop_error
+        self.stopped_with = "stop"
+
+    async def kill(self) -> None:
+        self.stopped_with = "kill"
 
     async def destroy(self, *, force: bool = False) -> None:
         self.destroyed = {"force": force}

@@ -15,14 +15,16 @@ from pydantic import ValidationError
 
 from agentbox import __version__
 from agentbox.config import AgentProfile, NetworkMode, WorkspaceMount
-from agentbox.errors import AgentboxError
+from agentbox.errors import AgentboxError, ProfileNotFoundError
 from agentbox.profiles import get_profile, load_profiles
 from agentbox.session import (
+    created_profile,
     destroy_sandbox,
     generate_name,
     launch_detached,
     list_sandboxes,
     open_session,
+    stop_sandbox,
 )
 
 T = TypeVar("T")
@@ -111,7 +113,15 @@ class _Overrides:
             updates["workspace"] = profile.workspace.model_copy(update={"readonly": True})
         if self.network is not None:
             updates["network"] = self.network
-        return profile.model_copy(update=updates | self._lifetime_updates())
+        # Validated again, not model_copy: the profile's checks must hold for what the flags made.
+        try:
+            return AgentProfile.model_validate(
+                profile.model_dump() | updates | self._lifetime_updates()
+            )
+        except ValidationError as exc:
+            problem = exc.errors()[0]
+            message = problem.get("ctx", {}).get("error", problem["msg"])
+            raise typer.BadParameter(str(message)) from exc
 
     def _lifetime_updates(self) -> dict[str, object]:
         if self.use is SandboxUse.LONG_LIVED:
@@ -250,6 +260,52 @@ def up(
         # A restart keeps its old limits, so hints built from this profile would be wrong.
         for hint in _lifetime_hints(profile):
             _hint(hint)
+
+
+@main.command()
+def start(
+    name: Annotated[str, typer.Argument(metavar="NAME")],
+    config: ConfigOption = None,
+) -> None:
+    """Start a stopped `up` box again, as it was created, and rerun its setup script.
+
+    Unlike `msb start`, which skips the profile's `setup_script` (and with it e.g. dockerd).
+    The profile is the one the box was created from; mounts, network and secrets stay as
+    they were.
+    """
+
+    async def execute() -> AgentProfile:
+        profile_name = await created_profile(name)
+        try:
+            profile = get_profile(profile_name, config)
+        except ProfileNotFoundError as exc:
+            # Most likely `up` read another profiles.toml than this run does.
+            raise AgentboxError(
+                f"{name} was made from profile {profile_name!r}: {exc}; "
+                "pass the --config it was brought up with"
+            ) from exc
+        await launch_detached(profile, name, existing=True)
+        return profile
+
+    profile = _guard(lambda: asyncio.run(execute()))
+    typer.echo(name)
+    _hint(f"{_msb_prefix()}msb exec {name} -- {profile.shell}")
+    _hint(f"{_prefix()}agentbox down {name}")
+
+
+@main.command()
+def stop(
+    name: Annotated[str, typer.Argument(metavar="NAME")],
+    force: Annotated[
+        bool, typer.Option("--force", "-f", help="Kill instead of shutting down gracefully.")
+    ] = False,
+) -> None:
+    """Stop a sandbox but keep its state; `agentbox start` boots it again."""
+    _guard(lambda: asyncio.run(stop_sandbox(name, force=force)))
+    # A `run` box is ephemeral: stopping deletes it, so only an `up` box can start again.
+    _hint(
+        f"stopped {name}; if `agentbox up` made it, {_prefix()}agentbox start {name} boots it again"
+    )
 
 
 @main.command("ls")

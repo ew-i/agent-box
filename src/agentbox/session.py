@@ -43,7 +43,25 @@ class AgentSession:
             raise SandboxStartupError(f"session {self.name!r} is not started")
         return self._sandbox
 
-    async def start(self, *, detached: bool = False) -> Self:
+    async def start(self, *, detached: bool = False, existing: bool = False) -> Self:
+        """Boot the sandbox, then run the profile's setup script in it.
+
+        ``existing`` starts a stopped sandbox of this name as it was created, without
+        checking it against this profile: only the setup script and workdir come from it.
+        """
+        from microsandbox import Sandbox
+
+        try:
+            if existing:
+                self._sandbox = await Sandbox.start(self.name, detached=detached)
+                self.restarted = True
+            else:
+                await self._create(detached=detached)
+        except Exception as exc:
+            raise SandboxStartupError(f"could not start sandbox {self.name!r}: {exc}") from exc
+        return await self._run_setup()
+
+    async def _create(self, *, detached: bool) -> None:
         from microsandbox import Sandbox, SandboxAlreadyExistsError
 
         from agentbox.microsandbox_adapter import to_sandbox_kwargs
@@ -51,25 +69,22 @@ class AgentSession:
         kwargs = to_sandbox_kwargs(self.profile)
         if detached:
             kwargs["detached"] = True
-
         try:
-            try:
-                self._sandbox = await Sandbox.create(self.name, **kwargs)
-            except SandboxAlreadyExistsError:
-                # A stopped `up` box keeps its name and state: start it again, with the settings
-                # it was created with. A running one raises "already running" here.
-                existing = (await Sandbox.get(self.name)).config().get("labels") or {}
-                if existing != kwargs["labels"]:
-                    raise SandboxStartupError(
-                        "it exists with another profile, workspace, home volume or network; "
-                        "remove it with "
-                        f"`agentbox down {self.name}` first"
-                    ) from None
-                self._sandbox = await Sandbox.start(self.name, detached=detached)
-                self.restarted = True
-        except Exception as exc:
-            raise SandboxStartupError(f"could not start sandbox {self.name!r}: {exc}") from exc
+            self._sandbox = await Sandbox.create(self.name, **kwargs)
+        except SandboxAlreadyExistsError:
+            # A stopped `up` box keeps its name and state: start it again, with the settings
+            # it was created with. A running one raises "already running" here.
+            labels = (await Sandbox.get(self.name)).config().get("labels") or {}
+            if labels != kwargs["labels"]:
+                raise SandboxStartupError(
+                    "it exists with another profile, workspace, home volume or network; "
+                    "remove it with "
+                    f"`agentbox down {self.name}` first"
+                ) from None
+            self._sandbox = await Sandbox.start(self.name, detached=detached)
+            self.restarted = True
 
+    async def _run_setup(self) -> Self:
         if script := self.profile.setup_script:
             # __aexit__ never runs when __aenter__ raises, so nothing else would stop it.
             try:
@@ -173,13 +188,14 @@ class SandboxInfo:
     profile: str | None
 
 
-async def launch_detached(profile: AgentProfile, name: str) -> bool:
+async def launch_detached(profile: AgentProfile, name: str, *, existing: bool = False) -> bool:
     """Boot a sandbox that keeps running after this process exits.
 
     Returns whether a stopped sandbox of that name was started again instead of created.
+    ``existing`` only starts a stopped one, as it was created (see :meth:`AgentSession.start`).
     """
     session = AgentSession(profile, name)
-    await session.start(detached=True)
+    await session.start(detached=True, existing=existing)
     try:
         await session.detach()
     except SandboxOperationError:
@@ -190,7 +206,7 @@ async def launch_detached(profile: AgentProfile, name: str) -> bool:
 
 
 async def list_sandboxes() -> list[SandboxInfo]:
-    """Every sandbox the runtime knows about, newest first."""
+    """Every sandbox the runtime knows about, in the order it reports them."""
     from microsandbox import Sandbox
 
     infos: list[SandboxInfo] = []
@@ -205,6 +221,39 @@ async def list_sandboxes() -> list[SandboxInfo]:
                 return infos
     except Exception as exc:
         raise SandboxOperationError(f"could not list sandboxes: {exc}") from exc
+
+
+async def created_profile(name: str) -> str:
+    """The name of the profile an existing sandbox was created from by ``agentbox up``."""
+    from microsandbox import Sandbox
+
+    try:
+        handle = await Sandbox.get(name)
+    except Exception as exc:
+        raise SandboxOperationError(f"could not find sandbox {name!r}: {exc}") from exc
+    try:
+        # Not _profile_label: a failing lookup must not pass for a box without the label.
+        labels = handle.config().get("labels") or {}
+    except Exception as exc:
+        raise SandboxOperationError(f"could not read sandbox {name!r}: {exc}") from exc
+    profile: str | None = labels.get("agentbox.profile")
+    if profile is None:
+        raise SandboxStartupError(
+            f"{name!r} has no agentbox profile label, so it wasn't made by `agentbox up`; "
+            f"start it with `msb start {name}`"
+        )
+    return profile
+
+
+async def stop_sandbox(name: str, *, force: bool = False) -> None:
+    """Stop a sandbox but keep its state, so ``agentbox start`` can boot it again."""
+    from microsandbox import Sandbox
+
+    try:
+        handle = await Sandbox.get(name)
+        await (handle.kill() if force else handle.stop())
+    except Exception as exc:
+        raise SandboxOperationError(f"could not stop sandbox {name!r}: {exc}") from exc
 
 
 async def destroy_sandbox(name: str, *, force: bool = False) -> None:
