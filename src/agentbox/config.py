@@ -9,11 +9,16 @@ expects is the job of :mod:`agentbox.microsandbox_adapter`.
 from __future__ import annotations
 
 import posixpath
+import re
 from enum import StrEnum
+from fnmatch import fnmatch
 from pathlib import Path, PurePosixPath
-from typing import Annotated, Self
+from typing import TYPE_CHECKING, Annotated, Any, Self
 
-from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, ValidationError, model_validator
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping, Sequence
 
 
 class NetworkMode(StrEnum):
@@ -44,7 +49,80 @@ def _absolute(path: str) -> str:
 
 GuestPath = Annotated[str, AfterValidator(_absolute)]
 
+
+def covers_subdomains(domain: str) -> bool:
+    """An allowed domain with a leading dot means "this domain and all of its subdomains"."""
+    return domain.startswith(".")
+
+
+def _plain_domain(domain: str) -> str:
+    # The network rule knows only exact names and dot-suffixes; a glob would never match.
+    if "*" in domain:
+        raise ValueError(f"{domain!r}: use 'x' or '.x' (x and its subdomains), not wildcards")
+    return domain
+
+
+AllowedDomain = Annotated[str, AfterValidator(_plain_domain)]
+
 EnvVarName = Annotated[str, Field(pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")]
+
+SANDBOX_PLACEHOLDER = "{sandbox}"
+"""Becomes the sandbox name in ``env`` values."""
+
+
+PROFILE_LABEL = "agentbox.profile"
+"""Sandbox label naming the profile it was created from."""
+
+EPHEMERAL_LABEL = "agentbox.ephemeral"
+"""Sandbox label set to :data:`EPHEMERAL_VALUE` on a box that stopping deletes, i.e. one made
+by ``run``."""
+
+EPHEMERAL_VALUE = "true"
+
+
+def sandbox_labels(handle: Any) -> dict[str, str]:
+    """The labels a sandbox was created with; raises what the runtime raises."""
+    labels: dict[str, str] = handle.config().get("labels") or {}
+    return labels
+
+
+def is_ephemeral(labels: Mapping[str, str]) -> bool:
+    """Whether labels mark a box that stopping deletes."""
+    return labels.get(EPHEMERAL_LABEL) == EPHEMERAL_VALUE
+
+
+_SANDBOX_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+_SANDBOX_NAME_MAX = 128
+"""microsandbox's limit; the pattern is ASCII, so characters are bytes."""
+
+
+def check_sandbox_name(name: str) -> str:
+    """``name`` if it is safe as a sandbox name, a path part and an unquoted shell word.
+
+    A ``/`` would let ``{sandbox}`` in an ``env`` path climb out of its volume.
+    """
+    if len(name) > _SANDBOX_NAME_MAX or not _SANDBOX_NAME.fullmatch(name):
+        raise ValueError(
+            f"invalid name {name!r}: use letters, digits, '.', '_' and '-', starting with a "
+            f"letter or digit, at most {_SANDBOX_NAME_MAX} characters"
+        )
+    return name
+
+
+def fill_sandbox_name(value: str, name: str) -> str:
+    return value.replace(SANDBOX_PLACEHOLDER, name)
+
+
+def first_problem(error: ValidationError, *prefix: str) -> str:
+    """One readable line out of pydantic's multi-error report: ``where: what``.
+
+    ``prefix`` locates the model in its file, e.g. ``profiles.rust``. A check of our own
+    reads as its message alone, without pydantic's ``Value error,`` in front.
+    """
+    problem = error.errors()[0]
+    location = ".".join([*prefix, *(str(part) for part in problem["loc"])])
+    message = problem.get("ctx", {}).get("error", problem["msg"])
+    return f"{location}: {message}" if location else str(message)
 
 
 class HostSecret(BaseModel):
@@ -74,9 +152,14 @@ class WorkspaceMount(BaseModel):
         """The absolute host directory, with ``~`` expanded and symlinks followed."""
         return self.host_path.expanduser().resolve()
 
-    @model_validator(mode="after")
-    def _not_containing_home(self) -> Self:
-        # Mounting $HOME or above hands over ~/.ssh and cloud keys.
+    def check_not_containing_home(self) -> Self:
+        """``self``, unless it would mount your home folder; raises ``ValueError`` then.
+
+        Mounting $HOME or above hands over ~/.ssh and cloud keys. Checked when the mount is
+        about to be used, not when a profile is loaded: a relative ``host_path`` resolves
+        against the current folder, and one profile must not break the others when that is
+        ``~``.
+        """
         # Reachability via samefile, not path comparison: /users (case-insensitive disk) and
         # /System/Volumes/Data (macOS firmlink) both contain /Users without being its parent.
         path = self.resolved_host_path
@@ -100,7 +183,8 @@ class AgentProfile(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    name: str = Field(min_length=1, max_length=64)
+    name: Annotated[str, Field(max_length=64), AfterValidator(check_sandbox_name)]
+    """Part of every generated sandbox name, so it follows the same rules."""
     description: str = ""
 
     image: str = "python:3.11-slim"
@@ -110,6 +194,7 @@ class AgentProfile(BaseModel):
     workdir: GuestPath = "/workspace"
     shell: str = "/bin/bash"
     env: dict[str, str] = Field(default_factory=dict)
+    """``{sandbox}`` in a value becomes the sandbox name, e.g. a per-box file in a shared home."""
 
     secrets: dict[EnvVarName, HostSecret] = Field(default_factory=dict)
     """Environment variable -> where its value may go. The value is read from the host's
@@ -117,7 +202,7 @@ class AgentProfile(BaseModel):
     swaps for the real value in requests to ``hosts`` and blocks everywhere else."""
 
     network: NetworkMode = NetworkMode.ALLOWLIST
-    allowed_domains: tuple[str, ...] = ()
+    allowed_domains: tuple[AllowedDomain, ...] = ()
 
     allow_private_dns: bool = False
     """Let ``allowed_domains`` resolve to private IPs, e.g. intranet hosts behind a VPN.
@@ -163,6 +248,35 @@ class AgentProfile(BaseModel):
             )
         return self
 
+    @property
+    def active_secrets(self) -> dict[str, HostSecret]:
+        """The secrets that apply: none offline, where nothing leaves the box for them to reach."""
+        return {} if self.network is NetworkMode.OFFLINE else self.secrets
+
+    @property
+    def secret_hosts(self) -> list[str]:
+        """Every host that receives the real value of an active secret."""
+        return [host for secret in self.active_secrets.values() for host in secret.hosts]
+
+    @model_validator(mode="after")
+    def _secrets_reach_their_hosts(self) -> Self:
+        hosts = self.secret_hosts
+        if bypassed := [h for h in hosts if any(covers(p, h) for p in self.tls_bypass)]:
+            # Bypassed traffic is never decrypted, so it can't get the real value.
+            raise ValueError(
+                f"secret hosts {', '.join(bypassed)} are in tls_bypass, so they would never get "
+                "the real value; remove them there"
+            )
+        patterns = domain_patterns(self.allowed_domains)
+        if self.network is NetworkMode.ALLOWLIST and (
+            blocked := [h for h in hosts if not any(covers(p, h) for p in patterns)]
+        ):
+            raise ValueError(
+                f"secret hosts {', '.join(blocked)} are not in allowed_domains, so every "
+                "request to them would be blocked; add them there"
+            )
+        return self
+
     @model_validator(mode="after")
     def _mount_paths_are_unique(self) -> Self:
         paths = [*self.named_volumes, *self.disks]
@@ -171,6 +285,28 @@ class AgentProfile(BaseModel):
         if len(paths) != len({posixpath.normpath(path) for path in paths}):
             raise ValueError("named volumes, disks and workspace must use different guest paths")
         return self
+
+    def per_box_files(self, sandbox: str) -> list[str]:
+        """``env`` paths that name ``sandbox`` and lie in a named volume, so they outlive it.
+
+        E.g. its own database in a shared home. Paths elsewhere, like the workspace, are the
+        user's to keep.
+        """
+        filled = (
+            fill_sandbox_name(value, sandbox)
+            for value in self.env.values()
+            if SANDBOX_PLACEHOLDER in value
+        )
+        return [
+            path
+            for path in filled
+            # Checked once filled in, and normpath'd, so neither `/home/agent-box/../workspace`
+            # nor a name with `/../` in it passes for the home volume.
+            if any(
+                PurePosixPath(posixpath.normpath(path)).is_relative_to(volume)
+                for volume in self.named_volumes
+            )
+        ]
 
     def required_directories(self) -> list[str]:
         """Guest directories that must exist before boot, parents before children.
@@ -188,6 +324,18 @@ class AgentProfile(BaseModel):
                 if ancestor not in ordered:
                     ordered.append(ancestor)
         return ordered
+
+
+def domain_patterns(allowed_domains: Sequence[str]) -> list[str]:
+    """Allowlist patterns: ``.x`` becomes ``*.x``, which also covers ``x`` (see :func:`covers`)."""
+    return [f"*{domain}" if covers_subdomains(domain) else domain for domain in allowed_domains]
+
+
+def covers(pattern: str, host: str) -> bool:
+    """Whether microsandbox applies ``pattern`` to ``host``: ``*.x`` also covers ``x`` itself,
+    unlike ``fnmatch`` (seen on a real microVM: ``*.openrouter.ai`` bypassed ``openrouter.ai``)."""
+    host, pattern = host.lower(), pattern.lower()  # domain names ignore case, fnmatch doesn't
+    return fnmatch(host, pattern) or (pattern.startswith("*.") and host == pattern[2:])
 
 
 def _ancestors(path: str) -> list[str]:

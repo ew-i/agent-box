@@ -7,7 +7,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from agentbox.config import AgentProfile, NetworkMode
+from agentbox.config import AgentProfile, NetworkMode, first_problem
 from agentbox.errors import ProfileConfigError, ProfileNotFoundError
 
 CONFIG_ENV_VAR = "AGENTBOX_CONFIG"
@@ -23,6 +23,9 @@ _AGENT_BOX = AgentProfile(
     # mise pulls toolchains from many hosts: nodejs.org, GitHub, Adoptium, Maven Central
     network=NetworkMode.PUBLIC,
     named_volumes={"/home/agent-box": "agent-box-home"},
+    # Tools stay shared in the home, but SQLite can't lock across microVMs: two boxes on one
+    # opencode.db corrupt it, so each box gets its own; a `run` box deletes it when it ends
+    env={"OPENCODE_DB": "/home/agent-box/.local/share/opencode/opencode-{sandbox}.db"},
     # Sandbox.create skips the image entrypoint: it seeds the volume and runs `mise install`
     setup_script="agent-box-entrypoint true",
     max_duration_s=7200,
@@ -70,9 +73,9 @@ def load_profiles(path: Path | None = None) -> dict[str, AgentProfile]:
     unreadable or invalid, or when ``path`` or ``$AGENTBOX_CONFIG`` names a missing file.
     Only a missing default file is not an error.
     """
-    config_path = _resolve_config_path(path)
+    config_path, named = _resolve_config_path(path)
     if not config_path.is_file():
-        if path is not None or os.environ.get(CONFIG_ENV_VAR):
+        if named:
             # A typo here would silently boot a built-in in place of the user's override.
             raise ProfileConfigError(config_path, "no such file")
         return dict(BUILTIN_PROFILES)
@@ -116,7 +119,7 @@ def _read_user_profiles(config_path: Path) -> dict[str, AgentProfile]:
     try:
         tables = _ProfilesFile.model_validate(document).profiles
     except ValidationError as exc:
-        raise ProfileConfigError(config_path, _first_problem(exc)) from exc
+        raise ProfileConfigError(config_path, first_problem(exc)) from exc
 
     profiles: dict[str, AgentProfile] = {}
     for name, table in tables.items():
@@ -124,21 +127,14 @@ def _read_user_profiles(config_path: Path) -> dict[str, AgentProfile]:
             # The table key is the name everything else looks the profile up by, so it wins.
             profiles[name] = AgentProfile.model_validate({**table, "name": name})
         except ValidationError as exc:
-            raise ProfileConfigError(config_path, _first_problem(exc, "profiles", name)) from exc
+            raise ProfileConfigError(config_path, first_problem(exc, "profiles", name)) from exc
     return profiles
 
 
-def _first_problem(error: ValidationError, *prefix: str) -> str:
-    """One readable line out of pydantic's multi-error report, located from the file's root."""
-    problem = error.errors()[0]
-    location = ".".join([*prefix, *(str(part) for part in problem["loc"])])
-    return f"{location or 'profiles'}: {problem['msg']}"
-
-
-def _resolve_config_path(path: Path | None) -> Path:
+def _resolve_config_path(path: Path | None) -> tuple[Path, bool]:
+    """The config file, and whether the user named it, in which case it must exist."""
+    if path is None and (from_env := os.environ.get(CONFIG_ENV_VAR)):
+        path = Path(from_env)
     if path is not None:
-        return path
-    from_env = os.environ.get(CONFIG_ENV_VAR)
-    if from_env:
-        return Path(from_env)
-    return default_config_path()
+        return path, True
+    return default_config_path(), False

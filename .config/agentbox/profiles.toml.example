@@ -46,3 +46,4 @@ allowed_domains = [
 MISE_ENV = "python,node"
 # opencode's default model. Loaded after ~/.config/opencode/opencode.json, so it wins.
 OPENCODE_CONFIG_CONTENT = '{"model": "openrouter/openai/gpt-6-luna"}'
+OPENCODE_DB = "/home/agent-box/.local/share/opencode/opencode-{sandbox}.db"

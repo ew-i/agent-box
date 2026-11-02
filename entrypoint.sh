@@ -5,9 +5,10 @@
 set -uo pipefail
 
 # A new microsandbox volume is empty (Docker's fills itself from the image): seed it
-# once from the image's copy of the home, never overwriting a file that is there
-if [ ! -e "$HOME/.bashrc" ] && [ -d /opt/agent-box-home ]; then
-  cp -a --update=none /opt/agent-box-home/. "$HOME"/
+# from the image's copy of the home, never overwriting a file that is there. The marker
+# is written last, so a copy cut short (Ctrl-C on the first boot) is finished next time.
+if [ ! -e "$HOME/.agent-box-seeded" ] && [ -d /opt/agent-box-home ]; then
+  cp -a --update=none /opt/agent-box-home/. "$HOME"/ && touch "$HOME/.agent-box-seeded"
 fi
 
 # From / so the project's mise.toml isn't read: `mise install` runs its code even when untrusted

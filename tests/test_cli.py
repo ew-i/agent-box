@@ -12,9 +12,9 @@ import pytest
 from typer.testing import CliRunner
 
 from agentbox import __version__
+from agentbox.boxes import SandboxInfo
 from agentbox.cli import main
-from agentbox.errors import SandboxOperationError, SandboxStartupError
-from agentbox.session import SandboxInfo
+from agentbox.errors import NotAgentboxSandboxError, SandboxConflictError, SandboxOperationError, SandboxStartupError, SecretNotSetError
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator
@@ -246,6 +246,34 @@ def test_given_a_profile_workspace_when_running_readonly_then_mounts_it_readonly
     assert workspace.readonly is True
 
 
+def test_given_a_profile_workspace_at_its_own_guest_path_when_running_with_a_workspace_then_keeps_that_path(tmp_path: Path, recorder: Recorder) -> None:
+    """--workspace swaps the host folder only; the profile's workdir may point at its guest path."""
+    config = tmp_path / "profiles.toml"
+    config.write_text(f'[profiles.mine]\nworkdir = "/src"\nworkspace = {{ host_path = "{tmp_path}", guest_path = "/src" }}\n', encoding="utf-8")
+    other = tmp_path / "other"
+    other.mkdir()
+
+    result = runner.invoke(main, ["run", "mine", "ls", "--workspace", str(other), "--config", str(config)])
+
+    assert result.exit_code == 0, result.output
+    workspace = recorder.profiles[0].workspace
+    assert (workspace.host_path, workspace.guest_path) == (other, "/src")
+
+
+def test_given_a_readonly_profile_workspace_when_running_with_another_workspace_then_keeps_it_readonly(tmp_path: Path, recorder: Recorder) -> None:
+    """Another folder must not turn a profile's read-only mount writable."""
+    config = tmp_path / "profiles.toml"
+    config.write_text(f'[profiles.mine]\nworkspace = {{ host_path = "{tmp_path}", readonly = true }}\n', encoding="utf-8")
+    other = tmp_path / "other"
+    other.mkdir()
+
+    result = runner.invoke(main, ["run", "mine", "ls", "--workspace", str(other), "--config", str(config)])
+
+    assert result.exit_code == 0, result.output
+    workspace = recorder.profiles[0].workspace
+    assert (workspace.host_path, workspace.readonly) == (other, True)
+
+
 def test_given_no_workspace_when_running_readonly_then_refuses(recorder: Recorder) -> None:
     result = runner.invoke(main, ["run", "airgapped", "ls", "--readonly"])
 
@@ -286,6 +314,21 @@ def test_given_a_timeout_when_running_then_forwards_it(recorder: Recorder) -> No
 
     assert result.exit_code == 0
     assert recorder.timeouts == [2.5]
+
+
+def test_given_a_zero_timeout_when_running_then_sets_no_limit(recorder: Recorder) -> None:
+    """0 means "no limit", as for --idle-timeout and --max-duration."""
+    result = runner.invoke(main, ["run", "airgapped", "sleep 1", "--timeout", "0"])
+
+    assert result.exit_code == 0
+    assert recorder.timeouts == [None]
+
+
+def test_given_a_negative_timeout_when_running_then_rejects_it_before_booting(recorder: Recorder) -> None:
+    result = runner.invoke(main, ["run", "airgapped", "ls", "--timeout", "-1"])
+
+    assert result.exit_code == 2
+    assert recorder.profiles == []
 
 
 def test_given_a_startup_failure_when_running_then_reports_it(recorder: Recorder) -> None:
@@ -461,6 +504,15 @@ def test_given_msb_only_in_the_venv_when_bringing_up_then_hints_uv_run_msb(tmp_p
     assert "uv run msb exec mybox" in result.stderr
 
 
+@pytest.mark.parametrize("name", ["a/../../workspace/x", "my box", "-rf", "x" * 129])
+def test_given_an_unsafe_name_when_bringing_up_then_refuses(launcher: list[tuple[Any, str]], name: str) -> None:
+    result = runner.invoke(main, ["up", "airgapped", "--name", name])
+
+    assert result.exit_code == 2
+    assert "invalid name" in " ".join(click.unstyle(result.output).replace("│", " ").split())
+    assert launcher == []
+
+
 def test_given_no_name_when_bringing_up_then_generates_one(launcher: list[tuple[Any, str]]) -> None:
     result = runner.invoke(main, ["up", "airgapped"])
 
@@ -547,6 +599,14 @@ def test_given_a_stopped_box_when_starting_it_then_restarts_it_with_its_own_prof
     assert "msb exec my-app" in result.stderr
 
 
+def test_given_a_stopped_box_when_starting_it_then_keeps_its_state_like_up(restarter: list[tuple[Any, str, bool]]) -> None:
+    """A failed setup stops the box; as a `run` box it would also delete its own database."""
+    runner.invoke(main, ["start", "my-app"])
+
+    [(profile, _, _)] = restarter
+    assert profile.ephemeral is False
+
+
 def test_given_a_box_whose_profile_is_gone_when_starting_it_then_exits_with_2(monkeypatch: pytest.MonkeyPatch, restarter: list[tuple[Any, str, bool]]) -> None:
     async def fake_profile(name: str) -> str:
         return "deleted"
@@ -598,21 +658,54 @@ def test_given_a_runtime_failure_when_listing_then_reports_it(monkeypatch: pytes
 
 @pytest.mark.parametrize(("args", "force"), [([], False), (["--force"], True)])
 def test_given_a_running_box_when_stopping_it_then_keeps_it_for_start(monkeypatch: pytest.MonkeyPatch, args: list[str], force: bool) -> None:
-    stopped: list[tuple[str, bool]] = []
+    stopped: list[tuple[str, bool, str]] = []
 
-    async def fake_stop(name: str, *, force: bool = False) -> None:
-        stopped.append((name, force))
+    async def fake_stop(name: str, *, force: bool = False, profile: Any = None) -> tuple[bool, list[str]]:
+        stopped.append((name, force, profile("agent-box").name))
+        return False, []
 
     monkeypatch.setattr("agentbox.cli.stop_sandbox", fake_stop)
     result = runner.invoke(main, ["stop", "my-app", *args])
 
     assert result.exit_code == 0
-    assert stopped == [("my-app", force)]
-    assert "agentbox start my-app" in result.stderr
+    assert stopped == [("my-app", force, "agent-box")]
+    assert "agentbox start my-app boots it again" in result.stderr
+    assert "msb start my-app for a box not made by agentbox" in result.stderr
+    assert "removed" not in result.stderr
+
+
+def test_given_a_run_box_when_stopping_it_then_says_it_was_removed_and_what_stays(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_stop(name: str, *, force: bool = False, profile: Any = None) -> tuple[bool, list[str]]:
+        return True, ["/home/agent-box/db-x"]
+
+    monkeypatch.setattr("agentbox.cli.stop_sandbox", fake_stop)
+    result = runner.invoke(main, ["stop", "x"])
+
+    assert result.exit_code == 0
+    assert "made by `agentbox run`, so stopping deletes it" in result.stderr
+    assert "removed x" in result.stderr
+    assert "/home/agent-box/db-x" in result.stderr
+    assert "agentbox start" not in result.stderr
+
+
+def test_given_an_up_box_whose_profile_cannot_load_when_stopping_then_does_not_warn_about_files(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Only removing a `run` box deletes files; a plain stop must not say they stay."""
+
+    async def fake_stop(name: str, *, force: bool = False, profile: Any = None) -> tuple[bool, list[str]]:
+        return False, []
+
+    config = tmp_path / "profiles.toml"
+    config.write_text("[profiles.dev]\ncpus = 0\n", encoding="utf-8")
+    monkeypatch.setattr("agentbox.cli.stop_sandbox", fake_stop)
+    result = runner.invoke(main, ["stop", "my-app", "-c", str(config)])
+
+    assert result.exit_code == 0
+    assert "not deleted" not in result.stderr
+    assert "stopped my-app" in result.stderr
 
 
 def test_given_a_runtime_failure_when_stopping_then_exits_with_2(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def boom(name: str, *, force: bool = False) -> None:
+    async def boom(name: str, *, force: bool = False, profile: Any = None) -> tuple[bool, list[str]]:
         raise SandboxOperationError("not running")
 
     monkeypatch.setattr("agentbox.cli.stop_sandbox", boom)
@@ -625,8 +718,9 @@ def test_given_a_runtime_failure_when_stopping_then_exits_with_2(monkeypatch: py
 def test_given_the_force_flag_when_tearing_down_then_removes_the_sandbox(monkeypatch: pytest.MonkeyPatch) -> None:
     removed: list[tuple[str, bool]] = []
 
-    async def fake_destroy(name: str, *, force: bool = False) -> None:
+    async def fake_destroy(name: str, *, force: bool = False, profile: Any = None) -> list[str]:
         removed.append((name, force))
+        return []
 
     monkeypatch.setattr("agentbox.cli.destroy_sandbox", fake_destroy)
     result = runner.invoke(main, ["down", "mybox", "--force"])
@@ -637,7 +731,7 @@ def test_given_the_force_flag_when_tearing_down_then_removes_the_sandbox(monkeyp
 
 
 def test_given_a_missing_sandbox_when_tearing_down_then_reports_it(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def boom(name: str, *, force: bool = False) -> None:
+    async def boom(name: str, *, force: bool = False, profile: Any = None) -> list[str]:
         raise SandboxOperationError("no such sandbox")
 
     monkeypatch.setattr("agentbox.cli.destroy_sandbox", boom)
@@ -645,3 +739,83 @@ def test_given_a_missing_sandbox_when_tearing_down_then_reports_it(monkeypatch: 
 
     assert result.exit_code == 2
     assert "no such sandbox" in result.stderr
+
+
+def test_given_a_box_from_a_profile_when_tearing_down_then_passes_it_and_hints_what_stays(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[Any] = []
+
+    async def fake_destroy(name: str, *, force: bool = False, profile: Any = None) -> list[str]:
+        seen.append(profile("agent-box"))
+        return ["/home/agent-box/db-mybox"]
+
+    monkeypatch.setattr("agentbox.cli.destroy_sandbox", fake_destroy)
+    result = runner.invoke(main, ["down", "mybox"])
+
+    assert result.exit_code == 0
+    assert seen[0].name == "agent-box"
+    assert "/home/agent-box/db-mybox" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("toml", "says"),
+    [
+        ("[profiles.dev]\ncpus = 0\n", "profiles.dev.cpus"),
+        ("", "unknown profile 'dev'"),
+    ],
+)
+def test_given_a_box_whose_profile_cannot_load_when_tearing_down_then_removes_it_and_says_files_stay(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, toml: str, says: str) -> None:
+    seen: list[Any] = []
+
+    async def fake_destroy(name: str, *, force: bool = False, profile: Any = None) -> list[str]:
+        seen.append(profile("dev"))
+        return []
+
+    config = tmp_path / "profiles.toml"
+    config.write_text(toml, encoding="utf-8")
+    monkeypatch.setattr("agentbox.cli.destroy_sandbox", fake_destroy)
+    result = runner.invoke(main, ["down", "mybox", "-c", str(config)])
+
+    assert result.exit_code == 0
+    assert seen == [None]
+    stderr = " ".join(result.stderr.split())
+    assert says in stderr
+    assert "files in shared volumes are not deleted" in stderr
+    assert "removed mybox" in stderr
+
+
+def test_given_limits_when_running_then_applies_them(recorder: Recorder) -> None:
+    result = runner.invoke(main, ["run", "airgapped", "true", "--idle-timeout", "5", "--max-duration", "0"])
+
+    assert result.exit_code == 0
+    assert (recorder.profiles[0].idle_timeout_s, recorder.profiles[0].max_duration_s) == (5, None)
+
+
+@pytest.mark.parametrize(
+    ("error", "hint"),
+    [
+        (SandboxConflictError("dev"), "pick another --name, or delete it with uv run agentbox down dev first (its state too)"),
+        (SecretNotSetError("KEY", "dev"), "if dev is a stopped box, uv run agentbox start dev restarts it"),
+        (NotAgentboxSandboxError("dev"), "start it with "),
+    ],
+)
+def test_given_an_error_with_a_next_step_when_running_then_hints_the_command(recorder: Recorder, monkeypatch: pytest.MonkeyPatch, error: Exception, hint: str) -> None:
+    """The layers below only say what went wrong; the CLI names the command that helps."""
+    monkeypatch.setenv("UV", "/usr/local/bin/uv")
+    recorder.error = error
+
+    result = runner.invoke(main, ["run", "airgapped", "true"])
+
+    assert result.exit_code == 2
+    assert str(error) in result.stderr
+    assert hint in result.stderr
+
+
+def test_given_a_missing_secret_for_a_run_box_when_running_then_does_not_suggest_starting_it(recorder: Recorder) -> None:
+    """A `run` box is never kept, so there is no stopped box to start."""
+    recorder.error = SecretNotSetError("KEY", None)
+
+    result = runner.invoke(main, ["run", "airgapped", "true"])
+
+    assert result.exit_code == 2
+    assert "KEY is not set" in result.stderr
+    assert "agentbox start" not in result.stderr

@@ -6,7 +6,7 @@ import pytest
 from microsandbox import Action, MountKind, Network, Protocol, Rule, VolumeKind
 
 from agentbox.config import AgentProfile, HostSecret, NetworkMode, WorkspaceMount
-from agentbox.errors import SandboxStartupError
+from agentbox.errors import SecretNotSetError
 from agentbox.microsandbox_adapter import _EGRESS, DIRECTORY_MODE, HTTPS_PORT, to_sandbox_kwargs
 from agentbox.profiles import BUILTIN_PROFILES
 
@@ -15,7 +15,7 @@ METADATA = "metadata"
 
 
 def network_of(profile: AgentProfile) -> Network:
-    network: Network = to_sandbox_kwargs(profile)["network"]
+    network: Network = to_sandbox_kwargs(profile, "box")["network"]
     return network
 
 
@@ -28,7 +28,7 @@ def destinations(rules: tuple[Rule, ...], action: Action) -> set[tuple[str, str]
 
 
 def test_given_a_profile_when_translating_then_passes_resources_and_label_through(profile: AgentProfile) -> None:
-    kwargs = to_sandbox_kwargs(profile)
+    kwargs = to_sandbox_kwargs(profile, "box")
 
     assert kwargs["image"] == "python:3.11-slim"
     assert kwargs["cpus"] == profile.cpus
@@ -36,6 +36,14 @@ def test_given_a_profile_when_translating_then_passes_resources_and_label_throug
     assert kwargs["workdir"] == profile.workdir
     assert kwargs["labels"]["agentbox.profile"] == "test"
     assert kwargs["labels"]["agentbox.network"].startswith("allowlist:")
+
+
+def test_given_a_run_profile_when_translating_then_labels_it_ephemeral_and_an_up_profile_not(profile: AgentProfile) -> None:
+    """`agentbox stop` tells the two apart; an `up` box's labels must stay as they were for restarts."""
+    kept = profile.model_copy(update={"ephemeral": False})
+
+    assert to_sandbox_kwargs(profile, "box")["labels"]["agentbox.ephemeral"] == "true"
+    assert "agentbox.ephemeral" not in to_sandbox_kwargs(kept, "box")["labels"]
 
 
 def test_given_edited_network_settings_when_translating_then_changes_the_label_a_restart_must_match(profile: AgentProfile) -> None:
@@ -55,18 +63,18 @@ def test_given_an_edited_home_volume_when_translating_then_changes_the_label_a_r
 
 
 def _network_label(profile: AgentProfile) -> str:
-    label: str = to_sandbox_kwargs(profile)["labels"]["agentbox.network"]
+    label: str = to_sandbox_kwargs(profile, "box")["labels"]["agentbox.network"]
     return label
 
 
 def test_given_a_workspace_when_translating_then_labels_the_mount_a_restart_must_match(tmp_path: Path, profile: AgentProfile) -> None:
     mounted = profile.model_copy(update={"workspace": WorkspaceMount(host_path=tmp_path, readonly=True)})
 
-    assert to_sandbox_kwargs(mounted)["labels"]["agentbox.workspace"] == f"{tmp_path.resolve()}:/workspace:ro"
+    assert to_sandbox_kwargs(mounted, "box")["labels"]["agentbox.workspace"] == f"{tmp_path.resolve()}:/workspace:ro"
 
 
 def test_given_lifetime_limits_when_translating_then_sends_them_as_seconds(profile: AgentProfile) -> None:
-    kwargs = to_sandbox_kwargs(profile)
+    kwargs = to_sandbox_kwargs(profile, "box")
 
     assert kwargs["max_duration"] == float(profile.max_duration_s or 0)
     assert kwargs["idle_timeout"] == float(profile.idle_timeout_s or 0)
@@ -77,7 +85,7 @@ def test_given_disabled_limits_when_translating_then_omits_them(profile: AgentPr
     """``None`` means "unset" and ``0`` means "disabled"; both mean "send no limit"."""
     forever = profile.model_copy(update={"max_duration_s": unbounded, "idle_timeout_s": unbounded})
 
-    kwargs = to_sandbox_kwargs(forever)
+    kwargs = to_sandbox_kwargs(forever, "box")
 
     assert "max_duration" not in kwargs
     assert "idle_timeout" not in kwargs
@@ -86,22 +94,28 @@ def test_given_disabled_limits_when_translating_then_omits_them(profile: AgentPr
 def test_given_env_when_mutating_the_translation_then_leaves_the_profile_intact(profile: AgentProfile) -> None:
     with_env = profile.model_copy(update={"env": {"TOKEN": "secret"}})
 
-    to_sandbox_kwargs(with_env)["env"]["TOKEN"] = "tampered"
+    to_sandbox_kwargs(with_env, "box")["env"]["TOKEN"] = "tampered"
 
     assert with_env.env == {"TOKEN": "secret"}
+
+
+def test_given_a_sandbox_placeholder_in_env_when_translating_then_fills_in_the_name(profile: AgentProfile) -> None:
+    templated = profile.model_copy(update={"env": {"OPENCODE_DB": "/h/opencode-{sandbox}.db"}})
+
+    assert to_sandbox_kwargs(templated, "sess")["env"]["OPENCODE_DB"] == "/h/opencode-sess.db"
 
 
 # --------------------------------------------------------------------------- workspace
 
 
 def test_given_no_workspace_when_translating_then_mounts_no_volumes(profile: AgentProfile) -> None:
-    assert "volumes" not in to_sandbox_kwargs(profile)
+    assert "volumes" not in to_sandbox_kwargs(profile, "box")
 
 
 def test_given_a_readonly_workspace_when_translating_then_binds_it_at_the_guest_path(tmp_path: Path, profile: AgentProfile) -> None:
     mounted = profile.model_copy(update={"workspace": WorkspaceMount(host_path=tmp_path, readonly=True)})
 
-    volumes = to_sandbox_kwargs(mounted)["volumes"]
+    volumes = to_sandbox_kwargs(mounted, "box")["volumes"]
 
     assert set(volumes) == {"/workspace"}
     assert volumes["/workspace"].bind == str(tmp_path.resolve())
@@ -112,15 +126,23 @@ def test_given_a_workspace_when_translating_then_mounts_it_nosuid_and_nodev(tmp_
     """A setuid binary on the host must not become a privilege escalation in the guest."""
     mounted = profile.model_copy(update={"workspace": WorkspaceMount(host_path=tmp_path)})
 
-    mount = to_sandbox_kwargs(mounted)["volumes"]["/workspace"]
+    mount = to_sandbox_kwargs(mounted, "box")["volumes"]["/workspace"]
 
     assert mount.nosuid is True
     assert mount.nodev is True
 
 
+def test_given_a_workspace_containing_home_when_translating_then_refuses_it(profile: AgentProfile) -> None:
+    """A profile built in Python skips the CLI's overrides; the mount itself must still refuse."""
+    mounted = profile.model_copy(update={"workspace": WorkspaceMount(host_path=Path.home())})
+
+    with pytest.raises(ValueError, match="contains your home folder"):
+        to_sandbox_kwargs(mounted, "box")
+
+
 def test_given_a_disk_when_translating_then_mounts_a_disk_owned_by_the_sandbox(profile: AgentProfile) -> None:
     """Owned, not named: a named disk can't attach to two sandboxes, so a second box would fail."""
-    mount = to_sandbox_kwargs(profile.model_copy(update={"disks": {"/var/lib/docker": 2048}}))["volumes"]["/var/lib/docker"]
+    mount = to_sandbox_kwargs(profile.model_copy(update={"disks": {"/var/lib/docker": 2048}}), "box")["volumes"]["/var/lib/docker"]
 
     assert (mount.kind, mount.owned_kind, mount.size_mib) == (MountKind.OWNED, VolumeKind.DISK, 2048)
     assert mount.nosuid is True
@@ -130,7 +152,7 @@ def test_given_a_disk_when_translating_then_mounts_a_disk_owned_by_the_sandbox(p
 def test_given_named_volumes_and_a_workspace_when_translating_then_mounts_both(tmp_path: Path, profile: AgentProfile) -> None:
     mounted = profile.model_copy(update={"named_volumes": {"/home/agent": "agent-home"}, "workspace": WorkspaceMount(host_path=tmp_path)})
 
-    volumes = to_sandbox_kwargs(mounted)["volumes"]
+    volumes = to_sandbox_kwargs(mounted, "box")["volumes"]
 
     assert set(volumes) == {"/home/agent", "/workspace"}
     assert volumes["/home/agent"].named == "agent-home"
@@ -143,7 +165,7 @@ def test_given_named_volumes_and_a_workspace_when_translating_then_mounts_both(t
 def test_given_a_nested_workdir_when_translating_then_patches_in_every_directory(profile: AgentProfile) -> None:
     deep = profile.model_copy(update={"workdir": "/srv/agent/work"})
 
-    patches = to_sandbox_kwargs(deep)["patches"]
+    patches = to_sandbox_kwargs(deep, "box")["patches"]
 
     assert [patch.path for patch in patches] == deep.required_directories()
     assert {patch.mode for patch in patches} == {DIRECTORY_MODE}
@@ -157,7 +179,7 @@ def test_given_a_secret_offline_when_translating_then_neither_needs_nor_passes_t
     monkeypatch.delenv("KEY", raising=False)
     offline = profile.model_copy(update={"network": NetworkMode.OFFLINE, "tls_bypass": ("openrouter.ai",), "secrets": {"KEY": HostSecret(hosts=("openrouter.ai",))}})
 
-    kwargs = to_sandbox_kwargs(offline)
+    kwargs = to_sandbox_kwargs(offline, "box")
 
     assert "secrets" not in kwargs
     assert kwargs["network"].tls is None
@@ -219,7 +241,7 @@ def test_given_allow_private_dns_when_translating_then_lets_allowed_domains_reso
 def test_given_allow_private_dns_when_labelling_then_a_restart_notices_the_change(profile: AgentProfile) -> None:
     private = profile.model_copy(update={"allow_private_dns": True})
 
-    assert to_sandbox_kwargs(private)["labels"]["agentbox.network"] != to_sandbox_kwargs(profile)["labels"]["agentbox.network"]
+    assert to_sandbox_kwargs(private, "box")["labels"]["agentbox.network"] != to_sandbox_kwargs(profile, "box")["labels"]["agentbox.network"]
 
 
 def test_given_allowlist_when_translating_then_matches_domains_without_decrypting_traffic(profile: AgentProfile) -> None:
@@ -235,7 +257,7 @@ def test_given_a_secret_when_translating_then_sends_the_host_value_only_to_its_h
     secret = HostSecret(hosts=("openrouter.ai",))
     with_secret = profile.model_copy(update={"allowed_domains": ("openrouter.ai",), "secrets": {"OPENROUTER_API_KEY": secret}})
 
-    (entry,) = to_sandbox_kwargs(with_secret)["secrets"]
+    (entry,) = to_sandbox_kwargs(with_secret, "box")["secrets"]
 
     assert (entry.env_var, entry.value, entry.allow) == ("OPENROUTER_API_KEY", "sk-real", ("openrouter.ai",))
     assert entry.substitution.header_fields == ("authorization",)
@@ -245,8 +267,21 @@ def test_given_a_secret_missing_from_the_host_when_translating_then_refuses_to_b
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     with_secret = profile.model_copy(update={"allowed_domains": ("openrouter.ai",), "secrets": {"OPENROUTER_API_KEY": HostSecret(hosts=("openrouter.ai",))}})
 
-    with pytest.raises(SandboxStartupError, match="OPENROUTER_API_KEY is not set"):
-        to_sandbox_kwargs(with_secret)
+    with pytest.raises(SecretNotSetError, match="OPENROUTER_API_KEY is not set") as caught:
+        to_sandbox_kwargs(with_secret.model_copy(update={"ephemeral": False}), "box")
+
+    assert caught.value.name == "box"
+
+
+def test_given_a_secret_missing_for_a_run_box_when_translating_then_names_no_box_to_restart(profile: AgentProfile, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A `run` box is never kept, so the CLI must not suggest starting it again."""
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    with_secret = profile.model_copy(update={"allowed_domains": ("openrouter.ai",), "secrets": {"OPENROUTER_API_KEY": HostSecret(hosts=("openrouter.ai",))}})
+
+    with pytest.raises(SecretNotSetError) as caught:
+        to_sandbox_kwargs(with_secret, "box")
+
+    assert caught.value.name is None
 
 
 def test_given_a_secret_when_translating_then_decrypts_only_traffic_to_its_hosts(profile: AgentProfile, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -263,15 +298,6 @@ def test_given_a_secret_when_translating_then_decrypts_only_traffic_to_its_hosts
     assert network_of(with_secret).tls.bypass == ("*.pypi.org",)
 
 
-def test_given_a_secret_host_outside_allowed_domains_when_translating_then_refuses_to_boot(profile: AgentProfile, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The allowlist would block every request to it, so the secret could never be used."""
-    monkeypatch.setenv("KEY", "v")
-    with_secret = profile.model_copy(update={"secrets": {"KEY": HostSecret(hosts=("api.pypi.org", "openrouter.ai"))}})
-
-    with pytest.raises(SandboxStartupError, match=r"secret hosts openrouter\.ai are not in allowed_domains"):
-        to_sandbox_kwargs(with_secret)
-
-
 @pytest.mark.parametrize("mode", [NetworkMode.PUBLIC, NetworkMode.CORPORATE, NetworkMode.UNRESTRICTED])
 def test_given_a_secret_outside_allowlist_mode_when_translating_then_bypasses_only_tls_bypass(profile: AgentProfile, monkeypatch: pytest.MonkeyPatch, mode: NetworkMode) -> None:
     """No allowlist to derive exemptions from, so every site not in tls_bypass is decrypted."""
@@ -286,16 +312,6 @@ def test_given_an_allowlist_with_tls_bypass_when_translating_then_adds_it_to_the
     with_secret = profile.model_copy(update={"allowed_domains": ("openrouter.ai",), "tls_bypass": ("pinned.example",), "secrets": {"KEY": HostSecret(hosts=("openrouter.ai",))}})
 
     assert network_of(with_secret).tls.bypass == ("pinned.example",)
-
-
-@pytest.mark.parametrize("pattern", ["openrouter.ai", "*.openrouter.ai", "*.ai", "OpenRouter.AI"])
-def test_given_a_secret_host_in_tls_bypass_when_translating_then_refuses_to_boot(profile: AgentProfile, monkeypatch: pytest.MonkeyPatch, pattern: str) -> None:
-    """Bypassed traffic is never decrypted, so the secret could never be used."""
-    monkeypatch.setenv("KEY", "v")
-    with_secret = profile.model_copy(update={"network": NetworkMode.PUBLIC, "tls_bypass": (pattern,), "secrets": {"KEY": HostSecret(hosts=("openrouter.ai",))}})
-
-    with pytest.raises(SandboxStartupError, match=r"secret hosts openrouter\.ai are in tls_bypass"):
-        to_sandbox_kwargs(with_secret)
 
 
 def test_given_tls_bypass_without_a_secret_when_translating_then_leaves_interception_off(profile: AgentProfile) -> None:

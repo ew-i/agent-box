@@ -4,7 +4,7 @@ ARG DOCKER_BASE=base
 FROM composer:${COMPOSER_VERSION} AS composer
 FROM jdxcode/mise:${MISE_VERSION} AS mise
 
-FROM debian:trixie@sha256:4c25275446ca371766b8b093c696782eabce06263fccacb8d5d813b3dc44b308 AS base
+FROM debian:trixie@sha256:2dc419c6d7fe3dad0a2f9fd469c34cc90b0f9ba642d8fde837fe3d7d34a0e7f1 AS base
 
 # apt packages are pinned to exact versions. Debian's mirrors drop old versions
 # with every update, so apt reads from the snapshot.debian.org date the base
@@ -80,6 +80,14 @@ RUN mise install \
 # && npm install -g @github/copilot@"$GITHUB_COPILOT_VERSION" \
  && rm -rf "$HOME/.cache" "$HOME/.npm" \
  && sudo cp -a "$HOME" /opt/agent-box-home
+
+# Boxes share the home, so OpenCode's background service would register in one shared file
+# and the services of two boxes would stop each other: each `opencode` runs its own server.
+# Its own layer, so changing it doesn't reinstall the agents above.
+RUN for home in "$HOME" /opt/agent-box-home; do \
+      mkdir -p "$home/.config/opencode" \
+      && printf '{\n  "disabled": true\n}\n' > "$home/.config/opencode/service.json"; \
+    done
 
 WORKDIR /workspace
 ENTRYPOINT ["agent-box-entrypoint"]

@@ -2,14 +2,22 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
+import io
+import shlex
 import sys
 import uuid
 import warnings
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, BinaryIO, Self
 
-from agentbox.errors import SandboxOperationError, SandboxStartupError
+from agentbox.config import sandbox_labels
+from agentbox.errors import (
+    SandboxConflictError,
+    SandboxOperationError,
+    SandboxStartupError,
+    wrap_errors,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -19,6 +27,9 @@ if TYPE_CHECKING:
 
 _NAME_SUFFIX_LENGTH = 8
 """Hex characters of randomness appended to a generated sandbox name."""
+
+_SIDE_FILES = ("", "-wal", "-shm", "-journal")
+"""A per-box file itself, then the files SQLite keeps next to a database."""
 
 
 class AgentSession:
@@ -30,10 +41,11 @@ class AgentSession:
             code = await session.shell_stream("pytest -q", stdout=out, stderr=err)
     """
 
-    def __init__(self, profile: AgentProfile, name: str) -> None:
+    def __init__(self, profile: AgentProfile, name: str, *, sandbox: Any | None = None) -> None:
+        """``sandbox`` wraps one that already runs, e.g. from ``handle.connect()``."""
         self.profile = profile
         self.name = name
-        self._sandbox: Any | None = None
+        self._sandbox: Any | None = sandbox
         self.restarted = False
 
     @property
@@ -49,40 +61,44 @@ class AgentSession:
         ``existing`` starts a stopped sandbox of this name as it was created, without
         checking it against this profile: only the setup script and workdir come from it.
         """
-        from microsandbox import Sandbox
-
-        try:
+        with wrap_errors(f"could not start sandbox {self.name!r}", SandboxStartupError):
             if existing:
-                self._sandbox = await Sandbox.start(self.name, detached=detached)
-                self.restarted = True
+                await self._restart(detached=detached)
             else:
                 await self._create(detached=detached)
-        except Exception as exc:
-            raise SandboxStartupError(f"could not start sandbox {self.name!r}: {exc}") from exc
         return await self._run_setup()
+
+    async def _restart(self, *, detached: bool) -> None:
+        """Start the stopped sandbox of this name, with the settings it was created with."""
+        from microsandbox import Sandbox
+
+        self._sandbox = await Sandbox.start(self.name, detached=detached)
+        self.restarted = True
 
     async def _create(self, *, detached: bool) -> None:
         from microsandbox import Sandbox, SandboxAlreadyExistsError
 
         from agentbox.microsandbox_adapter import to_sandbox_kwargs
 
-        kwargs = to_sandbox_kwargs(self.profile)
+        kwargs = to_sandbox_kwargs(self.profile, self.name)
         if detached:
             kwargs["detached"] = True
+        existed = await sandbox_exists(self.name)
         try:
             self._sandbox = await Sandbox.create(self.name, **kwargs)
+        except asyncio.CancelledError:
+            # Ctrl-C mid-create: the box may exist without this session holding it, and a
+            # detached one would then run unowned. Only one that wasn't there before is ours.
+            if not existed:
+                with contextlib.suppress(Exception):
+                    await (await Sandbox.get(self.name)).destroy(force=True)
+            raise
         except SandboxAlreadyExistsError:
             # A stopped `up` box keeps its name and state: start it again, with the settings
             # it was created with. A running one raises "already running" here.
-            labels = (await Sandbox.get(self.name)).config().get("labels") or {}
-            if labels != kwargs["labels"]:
-                raise SandboxStartupError(
-                    "it exists with another profile, workspace, home volume or network; "
-                    "remove it with "
-                    f"`agentbox down {self.name}` first"
-                ) from None
-            self._sandbox = await Sandbox.start(self.name, detached=detached)
-            self.restarted = True
+            if sandbox_labels(await Sandbox.get(self.name)) != kwargs["labels"]:
+                raise SandboxConflictError(self.name) from None
+            await self._restart(detached=detached)
 
     async def _run_setup(self) -> Self:
         if script := self.profile.setup_script:
@@ -93,7 +109,7 @@ class AgentSession:
                 if code := await self.shell_stream(script, stdout=out, stderr=out):
                     raise SandboxStartupError(f"setup script {script!r} exited with {code}")
             except BaseException:
-                await self.stop()
+                await self.stop(remove=not self.restarted)
                 raise
         return self
 
@@ -102,28 +118,57 @@ class AgentSession:
 
         Returns the sandbox name, ready for ``msb exec <name> -- ...``.
         """
-        try:
+        with wrap_errors(f"could not detach sandbox {self.name!r}"):
             await self.sandbox.detach()
-        except Exception as exc:
-            raise SandboxOperationError(f"could not detach sandbox {self.name!r}: {exc}") from exc
         self._sandbox = None
         return self.name
 
-    async def stop(self) -> None:
+    async def stop(self, *, remove: bool = False) -> None:
+        """Stop the sandbox; ``remove`` deletes it too, e.g. a new box whose start failed.
+
+        A new box has no state worth keeping, and nobody may know its generated name.
+        """
         if self._sandbox is None:
             return
+        if (self.profile.ephemeral or remove) and not await self.delete_box_files():
+            # Nothing reuses a `run` box's files under its generated name, so say what stays,
+            # e.g. when its time limit stopped it before rm could run.
+            warnings.warn(
+                f"these stay in the shared volume of {self.name!r}: "
+                + " ".join(self.profile.per_box_files(self.name)),
+                RuntimeWarning,
+                stacklevel=2,
+            )
         try:
-            await self._sandbox.stop()
+            await (self._sandbox.destroy(force=True) if remove else self._sandbox.stop())
         except Exception as exc:
             # Raising here would mask the error that ended the session; a warning still says
             # the microVM may be left running.
+            verb = "remove" if remove else "stop"
             warnings.warn(
-                f"could not stop sandbox {self.name!r}: {exc}; "
-                f"remove it with `agentbox down {self.name}`",
+                f"could not {verb} sandbox {self.name!r}: {exc}; it may still be running",
                 RuntimeWarning,
                 stacklevel=2,
             )
         self._sandbox = None
+
+    async def delete_box_files(self) -> bool:
+        """Delete this box's files in shared volumes (see ``AgentProfile.per_box_files``).
+
+        SQLite's side files go too, named exactly: a ``path-*`` glob would also take the files
+        of a box whose name starts with this one's. Best effort: returns whether it worked,
+        never raises, since stopping or removing the box matters more.
+        """
+        if not (paths := self.profile.per_box_files(self.name)):
+            return True
+        files = " ".join(shlex.quote(path + suffix) for path in paths for suffix in _SIDE_FILES)
+        try:
+            code = await self.shell_stream(
+                f"rm -f -- {files}", stdout=io.BytesIO(), stderr=io.BytesIO(), timeout=10
+            )
+        except Exception:
+            return False
+        return code == 0
 
     async def shell_stream(
         self,
@@ -138,7 +183,7 @@ class AgentSession:
 
         targets = {ExecEventType.STDOUT: stdout, ExecEventType.STDERR: stderr}
         exit_code: int | None = None
-        try:
+        with wrap_errors(f"could not run {script!r}"):
             handle = await self.sandbox.shell_stream(
                 script, cwd=self.profile.workdir, timeout=timeout
             )
@@ -148,8 +193,6 @@ class AgentSession:
                 elif (target := targets.get(event.event_type)) is not None:
                     target.write(event.data)
                     target.flush()
-        except Exception as exc:
-            raise SandboxOperationError(f"could not run {script!r}: {exc}") from exc
         if exit_code is None:
             raise SandboxOperationError(f"could not run {script!r}: it ended without an exit code")
         return exit_code
@@ -174,18 +217,20 @@ async def open_session(profile: AgentProfile) -> AsyncIterator[AgentSession]:
         yield session
 
 
+async def sandbox_exists(name: str) -> bool:
+    """Whether the runtime knows a sandbox ``name``; raises what else its lookup raises."""
+    from microsandbox import Sandbox, SandboxNotFoundError
+
+    try:
+        await Sandbox.get(name)
+    except SandboxNotFoundError:
+        return False
+    return True
+
+
 def generate_name(profile: AgentProfile) -> str:
     """A collision-resistant sandbox name derived from the profile."""
     return f"agentbox-{profile.name}-{uuid.uuid4().hex[:_NAME_SUFFIX_LENGTH]}"
-
-
-@dataclass(frozen=True, slots=True)
-class SandboxInfo:
-    """One sandbox known to the microsandbox runtime."""
-
-    name: str
-    status: str
-    profile: str | None
 
 
 async def launch_detached(profile: AgentProfile, name: str, *, existing: bool = False) -> bool:
@@ -200,78 +245,6 @@ async def launch_detached(profile: AgentProfile, name: str, *, existing: bool = 
         await session.detach()
     except SandboxOperationError:
         # Nobody would own a box left running here; stop() warns if even that fails.
-        await session.stop()
+        await session.stop(remove=not session.restarted)
         raise
     return session.restarted
-
-
-async def list_sandboxes() -> list[SandboxInfo]:
-    """Every sandbox the runtime knows about, in the order it reports them."""
-    from microsandbox import Sandbox
-
-    infos: list[SandboxInfo] = []
-    cursor: str | None = None
-    try:
-        while True:
-            page = await Sandbox.list_with(cursor=cursor)
-            for handle in page.sandboxes:
-                infos.append(SandboxInfo(handle.name, str(handle.status), _profile_label(handle)))
-            cursor = page.next_cursor
-            if cursor is None:
-                return infos
-    except Exception as exc:
-        raise SandboxOperationError(f"could not list sandboxes: {exc}") from exc
-
-
-async def created_profile(name: str) -> str:
-    """The name of the profile an existing sandbox was created from by ``agentbox up``."""
-    from microsandbox import Sandbox
-
-    try:
-        handle = await Sandbox.get(name)
-    except Exception as exc:
-        raise SandboxOperationError(f"could not find sandbox {name!r}: {exc}") from exc
-    try:
-        # Not _profile_label: a failing lookup must not pass for a box without the label.
-        labels = handle.config().get("labels") or {}
-    except Exception as exc:
-        raise SandboxOperationError(f"could not read sandbox {name!r}: {exc}") from exc
-    profile: str | None = labels.get("agentbox.profile")
-    if profile is None:
-        raise SandboxStartupError(
-            f"{name!r} has no agentbox profile label, so it wasn't made by `agentbox up`; "
-            f"start it with `msb start {name}`"
-        )
-    return profile
-
-
-async def stop_sandbox(name: str, *, force: bool = False) -> None:
-    """Stop a sandbox but keep its state, so ``agentbox start`` can boot it again."""
-    from microsandbox import Sandbox
-
-    try:
-        handle = await Sandbox.get(name)
-        await (handle.kill() if force else handle.stop())
-    except Exception as exc:
-        raise SandboxOperationError(f"could not stop sandbox {name!r}: {exc}") from exc
-
-
-async def destroy_sandbox(name: str, *, force: bool = False) -> None:
-    """Stop a sandbox and delete its persisted state."""
-    from microsandbox import Sandbox
-
-    try:
-        handle = await Sandbox.get(name)
-        await handle.destroy(force=force)
-    except Exception as exc:
-        raise SandboxOperationError(f"could not remove sandbox {name!r}: {exc}") from exc
-
-
-def _profile_label(handle: Any) -> str | None:
-    """Best-effort read of the ``agentbox.profile`` label; not every backend exposes it."""
-    try:
-        labels = handle.config().get("labels") or {}
-    except Exception:
-        return None
-    label: str | None = labels.get("agentbox.profile")
-    return label

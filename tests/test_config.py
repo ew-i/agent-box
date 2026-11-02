@@ -7,7 +7,25 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
-from agentbox.config import AgentProfile, HostSecret, NetworkMode, WorkspaceMount
+from agentbox.config import AgentProfile, HostSecret, NetworkMode, WorkspaceMount, first_problem
+
+# --------------------------------------------------------------------------- error lines
+
+
+@pytest.mark.parametrize(
+    ("fields", "prefix", "line"),
+    [
+        ({"cpus": 0}, ("profiles", "x"), "profiles.x.cpus: Input should be greater than or equal to 1"),
+        ({"network": "public", "allow_private_dns": True}, (), "allow_private_dns only applies to network = 'allowlist', not 'public'"),
+        ({"network": "public", "allow_private_dns": True}, ("profiles", "x"), "profiles.x: allow_private_dns only applies"),
+    ],
+)
+def test_given_a_validation_error_when_rendering_then_gives_where_and_what_without_pydantic_noise(fields: dict[str, Any], prefix: tuple[str, ...], line: str) -> None:
+    with pytest.raises(ValidationError) as excinfo:
+        AgentProfile(name="x", **fields)
+
+    assert first_problem(excinfo.value, *prefix).startswith(line)
+
 
 # --------------------------------------------------------------------------- defaults
 
@@ -27,6 +45,30 @@ def test_given_a_profile_when_assigning_a_field_then_raises_validation_error() -
         profile.image = "evil:latest"  # type: ignore[misc]
 
 
+def test_given_env_paths_when_listing_per_box_files_then_keeps_only_named_ones_in_a_named_volume() -> None:
+    """A shared file, or one in the user's workspace, is never a `run` box's to delete."""
+    profile = AgentProfile(
+        name="p",
+        named_volumes={"/home/a": "home"},
+        env={
+            "OWN": "/home/a/db-{sandbox}",
+            "SHARED": "/home/a/db",
+            "WORKSPACE": "/workspace/out-{sandbox}",
+            "ESCAPING": "/home/a/../workspace/out-{sandbox}",
+            "NOT_A_PATH": "box-{sandbox}",
+        },
+    )
+
+    assert profile.per_box_files("b1") == ["/home/a/db-b1"]
+
+
+def test_given_a_name_that_climbs_out_when_listing_per_box_files_then_leaves_the_path_out() -> None:
+    """The check runs on the filled-in path: the name itself must not escape the volume."""
+    profile = AgentProfile(name="p", named_volumes={"/home/a": "home"}, env={"OWN": "/home/a/db-{sandbox}"})
+
+    assert profile.per_box_files("x/../../../workspace/notes") == []
+
+
 # --------------------------------------------------------------------------- validation
 
 
@@ -35,9 +77,20 @@ def test_given_an_unknown_field_when_creating_a_profile_then_rejects_it() -> Non
         AgentProfile(name="typo", memroy_mib=512)  # type: ignore[call-arg]
 
 
-def test_given_an_empty_name_when_creating_a_profile_then_rejects_it() -> None:
+@pytest.mark.parametrize("name", ["", "a/b", "my box", ".hidden", "-rf", "x" * 65])
+def test_given_an_unsafe_name_when_creating_a_profile_then_rejects_it(name: str) -> None:
+    """The profile name goes into every generated sandbox name."""
     with pytest.raises(ValidationError):
-        AgentProfile(name="")
+        AgentProfile(name=name)
+
+
+def test_given_an_offline_profile_when_reading_its_secrets_then_none_apply() -> None:
+    secrets = {"KEY": HostSecret(hosts=("openrouter.ai",))}
+    offline = AgentProfile(name="x", network=NetworkMode.OFFLINE, secrets=secrets)
+    public = AgentProfile(name="x", network=NetworkMode.PUBLIC, secrets=secrets)
+
+    assert (offline.active_secrets, offline.secret_hosts) == ({}, [])
+    assert (public.active_secrets, public.secret_hosts) == (secrets, ["openrouter.ai"])
 
 
 @pytest.mark.parametrize(
@@ -102,9 +155,9 @@ def alias(path: Path) -> object:
         alias(Path("/System/Volumes/Data")),  # macOS firmlink to /Users
     ],
 )
-def test_given_a_folder_containing_home_when_creating_a_mount_then_rejects_it(host_path: Path) -> None:
-    with pytest.raises(ValidationError, match="contains your home folder"):
-        WorkspaceMount(host_path=host_path)
+def test_given_a_folder_containing_home_when_checking_a_mount_then_rejects_it(host_path: Path) -> None:
+    with pytest.raises(ValueError, match="contains your home folder"):
+        WorkspaceMount(host_path=host_path).check_not_containing_home()
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file permissions")
@@ -114,7 +167,7 @@ def test_given_a_folder_we_may_not_open_when_creating_a_mount_then_accepts_it(tm
     locked.mkdir(mode=0o000)
 
     try:
-        assert WorkspaceMount(host_path=locked).host_path == locked
+        assert WorkspaceMount(host_path=locked).check_not_containing_home().host_path == locked
     finally:
         locked.chmod(0o755)
 
@@ -123,6 +176,26 @@ def test_given_a_name_in_both_env_and_secrets_when_creating_a_profile_then_rejec
     """The real value in env would sit next to the placeholder, visible to the guest."""
     with pytest.raises(ValidationError, match="KEY in both env and secrets"):
         AgentProfile(name="x", env={"KEY": "sk-real"}, secrets={"KEY": HostSecret(hosts=("a.example",))})
+
+
+def test_given_a_secret_host_outside_allowed_domains_when_creating_a_profile_then_rejects_it() -> None:
+    """The allowlist would block every request to it, so the secret could never be used."""
+    with pytest.raises(ValidationError, match=r"secret hosts openrouter\.ai are not in allowed_domains"):
+        AgentProfile(name="x", allowed_domains=(".pypi.org",), secrets={"KEY": HostSecret(hosts=("api.pypi.org", "openrouter.ai"))})
+
+
+@pytest.mark.parametrize("pattern", ["openrouter.ai", "*.openrouter.ai", "*.ai", "OpenRouter.AI"])
+def test_given_a_secret_host_in_tls_bypass_when_creating_a_profile_then_rejects_it(pattern: str) -> None:
+    """Bypassed traffic is never decrypted, so the secret could never be used."""
+    with pytest.raises(ValidationError, match=r"secret hosts openrouter\.ai are in tls_bypass"):
+        AgentProfile(name="x", network=NetworkMode.PUBLIC, tls_bypass=(pattern,), secrets={"KEY": HostSecret(hosts=("openrouter.ai",))})
+
+
+def test_given_an_offline_profile_with_unreachable_secrets_when_creating_it_then_accepts_it() -> None:
+    """Offline skips secrets, so there is nothing for them to reach."""
+    profile = AgentProfile(name="x", network=NetworkMode.OFFLINE, tls_bypass=("openrouter.ai",), secrets={"KEY": HostSecret(hosts=("openrouter.ai",))})
+
+    assert profile.secrets
 
 
 @pytest.mark.parametrize("mode", [NetworkMode.OFFLINE, NetworkMode.PUBLIC, NetworkMode.CORPORATE, NetworkMode.UNRESTRICTED])
@@ -184,3 +257,9 @@ def test_given_a_shared_ancestor_when_listing_directories_then_lists_it_once(tmp
     )
 
     assert mounted.required_directories() == ["/srv", "/srv/work", "/srv/repo"]
+
+
+def test_given_a_wildcard_in_allowed_domains_when_creating_a_profile_then_rejects_it() -> None:
+    """The network rule knows exact names and dot-suffixes only, so a glob would block the host."""
+    with pytest.raises(ValidationError, match=r"use 'x' or '.x'"):
+        AgentProfile(name="x", allowed_domains=("*.openrouter.ai",))

@@ -73,12 +73,16 @@ agentbox down "$BOX"
 
 `up` with the name of a stopped box restarts it with its original settings. It refuses if
 you change the profile, workspace, `--readonly`, `--network`, or the profile's `network`,
-`allowed_domains`, `tls_bypass`, `secrets` or `named_volumes`; `agentbox down` it first.
+`allowed_domains`, `allow_private_dns`, `tls_bypass`, `secrets` or `named_volumes`; `agentbox down` it first.
 Rotated secrets and new time limits also only apply after `down`.
 
 `agentbox start NAME` does the same from just the name: it starts the stopped box as it was
 created (mounts, network, secrets) and reruns its profile's `setup_script`, which
 `msb start` skips.
+
+`agentbox stop` on a `run` box removes it like `agentbox down`, since stopping deletes it
+anyway. Box and profile names may only use letters, digits, `.`, `_` and `-`, and must start
+with a letter or digit.
 
 `show` prints the profile that would actually boot, with `env` values masked. It takes the
 same flags as `run` and `up`:
@@ -94,11 +98,11 @@ agentbox show airgapped --for up        # as `up` would boot it
 |-------------------|--------------------------------|------------------------------------------|
 | Script argument   | required                       | none, connect with `msb exec`            |
 | Lifetime          | ends with the command          | until `agentbox down`                    |
-| Idle / max limits | profile's, as a backstop       | none, unless you pass the flags          |
+| Idle / max limits | profile's, unless flags given  | none, unless you pass the flags          |
 | `ephemeral`       | `True` (profile default)       | forced `False`, so state survives a stop |
 
 `--idle-timeout` stops an unused box, `--max-duration` stops it regardless; `0` disables
-either:
+either. Both work for `run` and `up`:
 
 ```bash
 agentbox up agent-box --name capped --idle-timeout 600 --max-duration 7200
@@ -138,10 +142,20 @@ msb exec my-app -- bash -l
 
 Log in to your agents once and set your git identity. `/home/agent-box` is the named volume
 `agent-box-home`, shared by every `agent-box` box and kept across `down`, so logins,
-updates, history and toolchains carry over.
+updates, history and toolchains carry over. Only OpenCode's database is kept per box
+(`OPENCODE_DB=…/opencode-{sandbox}.db`): SQLite can't lock across microVMs, so two boxes
+running OpenCode on one database corrupt it. A profile of your own on `agent-box-home` needs
+that `env` line too. `{sandbox}` in an `env` value becomes the box's name. A `run` box
+deletes such a file when it ends, with its `-wal`/`-shm` files: an `env` path in a named
+volume that contains `{sandbox}`. `agentbox down` (and `agentbox stop` on a `run` box) deletes it too if the box is running; for
+a stopped box it prints the files it had to leave. A box made before this setting keeps the
+shared database when started again: recreate it once with `agentbox down` and `agentbox up`. A new home also
+gets `~/.config/opencode/service.json` with `"disabled": true`: each `opencode` runs its own
+server, since background services of two boxes would stop each other through the shared home.
 
 microsandbox volumes start empty, so the image keeps its home in `/opt/agent-box-home` and
-`agent-box-entrypoint` copies it into a volume without `.bashrc`. The profile's
+`agent-box-entrypoint` copies it into a volume until a copy completes (marked by
+`~/.agent-box-seeded`), never overwriting files already there. The profile's
 `setup_script` runs the entrypoint on every boot, since `Sandbox.create` skips the image
 entrypoint. The profile uses `public` networking: mise downloads from too many hosts for an
 allowlist.
@@ -163,7 +177,8 @@ msb exec -e MISE_ENV=java,go my-app -- agent-box-entrypoint bash -l
 ```
 
 To make it permanent, copy the `agent-box` profile into your `profiles.toml` with
-`env = { MISE_ENV = "java,go" }`. The first start with a new preset takes up to a minute.
+`env = { MISE_ENV = "java,go", OPENCODE_DB = "/home/agent-box/.local/share/opencode/opencode-{sandbox}.db" }`
+(keep `OPENCODE_DB`, see [Working in it](#working-in-it)). The first start with a new preset takes up to a minute.
 Presets are pinned mise configs in [`mise/`](mise/); add e.g. `mise/config.rust.toml` and
 rebuild. There's no `python3` without the `python` preset.
 
@@ -207,6 +222,7 @@ cpus = 4
 memory_mib = 4096
 network = "public"
 named_volumes = { "/home/agent-box" = "agent-box-home" }
+env = { OPENCODE_DB = "/home/agent-box/.local/share/opencode/opencode-{sandbox}.db" }
 disks = { "/var/lib/docker" = 20480 }
 setup_script = "agent-box-entrypoint agent-box-start-dockerd"
 ```
@@ -255,8 +271,9 @@ network = "public"
 tls_bypass = ["*.docker.io", "*.docker.com"]
 ```
 
-Boot fails if a secret host is missing from the allowlist, is in `tls_bypass`, or the
-variable isn't set. A name can't be in both `env` and `secrets`. `offline` skips secrets.
+A profile is invalid (exit 2, with the file and profile named) if a secret host is missing from
+the allowlist or is in `tls_bypass`. Boot fails if the variable isn't set. A name can't be in
+both `env` and `secrets`. `offline` skips secrets.
 
 Don't pass keys with `msb exec -e` (the guest sees them) or mount host credential folders
 (`~/.ssh`, `~/.aws`, `~/.config/gcloud`, `~/.kube`, `~/.claude`). For git push, use HTTPS with
@@ -338,11 +355,14 @@ Dependencies are pinned in `pyproject.toml` and locked in `uv.lock`. To bump: `u
 ```
 src/agentbox/
   config.py                 AgentProfile / WorkspaceMount / NetworkMode — pure data
+  overrides.py              Overrides / SandboxUse: what a command's flags do to a profile
   microsandbox_adapter.py   profile -> Sandbox.create kwargs; the only SDK-aware module
   profiles.py               built-in profiles + TOML loading
-  session.py                AgentSession, open_session, launch_detached, list/destroy
+  session.py                AgentSession, open_session, launch_detached
+  boxes.py                  existing boxes by name: list, find, stop, destroy
+  commands.py               copy-pasteable `agentbox` / `msb` commands for hints
   cli.py                    typer entry point: run, up, start, stop, ls, down, profiles, show
-  errors.py                 AgentboxError hierarchy
+  errors.py                 AgentboxError hierarchy, wrap_errors
 Dockerfile                  the agent-box image, with entrypoint.sh, mise/, start-dockerd.sh,
                             docker-entrypoint.sh
 tests/

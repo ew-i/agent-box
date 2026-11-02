@@ -4,6 +4,8 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
 
+from microsandbox import SandboxNotFoundError
+
 
 @dataclass
 class FakeExecEvent:
@@ -20,7 +22,6 @@ class ExecCall:
 
     command: str
     cwd: str | None
-    env: dict[str, str] | None
     timeout: float | None
 
 
@@ -32,6 +33,7 @@ class FakeSandbox:
         self.calls: list[ExecCall] = []
         self.stopped = False
         self.detached = False
+        self.destroyed: dict[str, Any] | None = None
 
     @property
     def commands(self) -> list[str]:
@@ -42,10 +44,9 @@ class FakeSandbox:
         script: str,
         *,
         cwd: str | None = None,
-        env: dict[str, str] | None = None,
         timeout: float | None = None,
     ) -> AsyncIterator[FakeExecEvent]:
-        self.calls.append(ExecCall(script, cwd, env, timeout))
+        self.calls.append(ExecCall(script, cwd, timeout))
 
         async def events() -> AsyncIterator[FakeExecEvent]:
             for event in self.events:
@@ -59,13 +60,19 @@ class FakeSandbox:
     async def stop(self) -> None:
         self.stopped = True
 
+    async def destroy(self, *, force: bool = False) -> None:
+        self.destroyed = {"force": force}
+
 
 class FakeSandboxFactory:
-    """Stands in for ``microsandbox.Sandbox`` while a session starts."""
+    """Stands in for the ``microsandbox.Sandbox`` class: ``create``, ``start``, ``get``, ``list_with``."""
 
     def __init__(self) -> None:
         self.events: list[FakeExecEvent] | None = None
-        self.existing_labels: dict[str, str] | None = None
+        self.handles: dict[str, FakeHandle] = {}
+        self.pages: list[FakePage] = []
+        self.list_error: Exception | None = None
+        self.cursors: list[str | None] = []
         self.error: Exception | None = None
         self.restart_error: Exception | None = None
         self.names: list[str] = []
@@ -87,10 +94,24 @@ class FakeSandboxFactory:
         self._created = FakeSandbox(self.events)
         return self._created
 
+    def add(self, handle: FakeHandle) -> FakeHandle:
+        """Make ``handle`` a sandbox the runtime knows by its name."""
+        self.handles[handle.name] = handle
+        return handle
+
     async def get(self, name: str) -> FakeHandle:
-        """The existing sandbox; created from the same settings unless ``existing_labels`` says not."""
-        labels = self.existing_labels if self.existing_labels is not None else self.kwargs[-1]["labels"]
-        return FakeHandle(name, "stopped", labels)
+        """An added sandbox, else a stopped one created with the last ``create``'s settings."""
+        if name in self.handles:
+            return self.handles[name]
+        if not self.kwargs:
+            raise SandboxNotFoundError(f"sandbox {name!r} not found")
+        return FakeHandle(name, "stopped", self.kwargs[-1]["labels"])
+
+    async def list_with(self, *, cursor: str | None = None) -> FakePage:
+        if self.list_error is not None:
+            raise self.list_error
+        self.cursors.append(cursor)
+        return self.pages[len(self.cursors) - 1]
 
     async def start(self, name: str, *, detached: bool = False) -> FakeSandbox:
         """``Sandbox.start``: boot a stopped sandbox that already exists."""
@@ -110,8 +131,15 @@ class FakeHandle:
         self.labels = labels
         self.config_error: Exception | None = None
         self.destroyed: dict[str, Any] | None = None
+        self.destroy_error: Exception | None = None
         self.stop_error: Exception | None = None
         self.stopped_with: str | None = None
+        self.connected: FakeSandbox | None = None
+
+    async def connect(self) -> FakeSandbox:
+        """A running box, ready for commands; ``connected`` keeps what it was asked to run."""
+        self.connected = FakeSandbox()
+        return self.connected
 
     def config(self) -> dict[str, Any]:
         if self.config_error is not None:
@@ -127,6 +155,8 @@ class FakeHandle:
         self.stopped_with = "kill"
 
     async def destroy(self, *, force: bool = False) -> None:
+        if self.destroy_error is not None:
+            raise self.destroy_error
         self.destroyed = {"force": force}
 
 
@@ -134,32 +164,3 @@ class FakeHandle:
 class FakePage:
     sandboxes: list[FakeHandle]
     next_cursor: str | None
-
-
-class FakeListing:
-    """Stands in for ``microsandbox.Sandbox`` during ``list_sandboxes()``."""
-
-    def __init__(self, pages: list[FakePage], error: Exception | None = None) -> None:
-        self.pages = pages
-        self.error = error
-        self.cursors: list[str | None] = []
-
-    async def list_with(self, *, cursor: str | None = None) -> FakePage:
-        if self.error is not None:
-            raise self.error
-        self.cursors.append(cursor)
-        return self.pages[len(self.cursors) - 1]
-
-
-class FakeLookup:
-    """Stands in for ``microsandbox.Sandbox`` during ``destroy_sandbox()``."""
-
-    def __init__(self, handle: FakeHandle | None, error: Exception | None = None) -> None:
-        self.handle = handle
-        self.error = error
-
-    async def get(self, name: str) -> FakeHandle:
-        if self.error is not None:
-            raise self.error
-        assert self.handle is not None, "configure a handle or an error"
-        return self.handle

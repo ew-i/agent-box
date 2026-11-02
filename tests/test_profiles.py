@@ -270,3 +270,11 @@ def test_given_the_package_when_importing_the_main_module_then_exposes_main() ->
     import agentbox.__main__
 
     assert agentbox.__main__.main is not None
+
+
+def test_given_a_relative_workspace_when_loading_from_home_then_other_profiles_still_load(config_file: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`.` resolves against the current folder; run from ~, only booting that profile fails."""
+    config_file.write_text(CUSTOM + '[profiles.here]\nworkspace = { host_path = "." }\n', encoding="utf-8")
+    monkeypatch.chdir(Path.home())
+
+    assert get_profile("rust", config_file).image == "rust:1-slim"
