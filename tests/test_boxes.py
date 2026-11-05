@@ -240,6 +240,16 @@ async def test_given_a_running_box_with_its_own_file_when_destroying_then_delete
     assert (left, handle.destroyed) == ([], {"force": False})
 
 
+async def test_given_keep_files_when_destroying_then_leaves_its_own_files(profile: AgentProfile, runtime: FakeSandboxFactory) -> None:
+    handle = FakeHandle("a", "running", _MADE_FROM_P)
+    runtime.add(handle)
+
+    left = await destroy_sandbox("a", profile=_loads(profile.model_copy(update=_CLEANUP)), keep_files=True)
+
+    assert handle.connected is None
+    assert (left, handle.destroyed) == ([], {"force": False})
+
+
 async def test_given_a_stopped_box_with_its_own_file_when_destroying_then_returns_what_it_left(profile: AgentProfile, runtime: FakeSandboxFactory) -> None:
     handle = FakeHandle("a", "stopped", _MADE_FROM_P)
     runtime.add(handle)

@@ -135,7 +135,8 @@ Exception: OpenCode's database is per box (`OPENCODE_DB=…/opencode-{sandbox}.d
 SQLite can't lock across microVMs. Custom profiles on `agent-box-home` need that `env` line
 too. `{sandbox}` in an `env` value becomes the box name; such a file in a named volume (plus
 `-wal`/`-shm`) is deleted when a `run` box ends, or by `agentbox down` on a running box (a
-stopped box lists the files left behind). Boxes created before this setting keep the shared
+stopped box lists the files left behind). `agentbox down NAME --keep-history` keeps them, so
+`agentbox up --name NAME` picks the history up again. Boxes created before this setting keep the shared
 database until recreated. A new home also gets `~/.config/opencode/service.json` with
 `"disabled": true`, since background services of two boxes would stop each other.
 

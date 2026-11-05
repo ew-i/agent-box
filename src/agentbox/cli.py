@@ -294,11 +294,30 @@ def down(
     name: Annotated[str, typer.Argument(metavar="NAME")],
     force: ForceOption = False,
     config: ConfigOption = None,
+    keep_history: Annotated[
+        bool,
+        typer.Option(
+            "--keep-history",
+            help="Keep the box's own files in shared volumes (e.g. OpenCode history).",
+        ),
+    ] = False,
 ) -> None:
-    """Stop a sandbox and delete its persisted state, its own files in shared volumes too."""
+    """Stop a sandbox and delete its persisted state, its own files in shared volumes too.
 
-    left = _run(destroy_sandbox(name, force=force, profile=_cleanup_profile(name, config)))
+    With `--keep-history` those files stay, so `agentbox up --name NAME` picks them up again.
+    """
+
+    left = _run(
+        destroy_sandbox(
+            name,
+            force=force,
+            profile=_cleanup_profile(name, config),
+            keep_files=keep_history,
+        )
+    )
     _removed_hints(name, left)
+    if keep_history:
+        _hint(f"kept its files in shared volumes; `up --name {name}` reuses them")
 
 
 def _made_from(name: str, profile_name: str, config: Path | None) -> AgentProfile:

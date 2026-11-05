@@ -718,7 +718,7 @@ def test_given_a_runtime_failure_when_stopping_then_exits_with_2(monkeypatch: py
 def test_given_the_force_flag_when_tearing_down_then_removes_the_sandbox(monkeypatch: pytest.MonkeyPatch) -> None:
     removed: list[tuple[str, bool]] = []
 
-    async def fake_destroy(name: str, *, force: bool = False, profile: Any = None) -> list[str]:
+    async def fake_destroy(name: str, *, force: bool = False, profile: Any = None, keep_files: bool = False) -> list[str]:
         removed.append((name, force))
         return []
 
@@ -731,7 +731,7 @@ def test_given_the_force_flag_when_tearing_down_then_removes_the_sandbox(monkeyp
 
 
 def test_given_a_missing_sandbox_when_tearing_down_then_reports_it(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def boom(name: str, *, force: bool = False, profile: Any = None) -> list[str]:
+    async def boom(name: str, *, force: bool = False, profile: Any = None, keep_files: bool = False) -> list[str]:
         raise SandboxOperationError("no such sandbox")
 
     monkeypatch.setattr("agentbox.cli.destroy_sandbox", boom)
@@ -744,7 +744,7 @@ def test_given_a_missing_sandbox_when_tearing_down_then_reports_it(monkeypatch: 
 def test_given_a_box_from_a_profile_when_tearing_down_then_passes_it_and_hints_what_stays(monkeypatch: pytest.MonkeyPatch) -> None:
     seen: list[Any] = []
 
-    async def fake_destroy(name: str, *, force: bool = False, profile: Any = None) -> list[str]:
+    async def fake_destroy(name: str, *, force: bool = False, profile: Any = None, keep_files: bool = False) -> list[str]:
         seen.append(profile("agent-box"))
         return ["/home/agent-box/db-mybox"]
 
@@ -754,6 +754,21 @@ def test_given_a_box_from_a_profile_when_tearing_down_then_passes_it_and_hints_w
     assert result.exit_code == 0
     assert seen[0].name == "agent-box"
     assert "/home/agent-box/db-mybox" in result.stderr
+
+
+def test_given_keep_history_when_tearing_down_then_keeps_the_box_files(monkeypatch: pytest.MonkeyPatch) -> None:
+    kept: list[bool] = []
+
+    async def fake_destroy(name: str, *, force: bool = False, profile: Any = None, keep_files: bool = False) -> list[str]:
+        kept.append(keep_files)
+        return []
+
+    monkeypatch.setattr("agentbox.cli.destroy_sandbox", fake_destroy)
+    result = runner.invoke(main, ["down", "mybox", "--keep-history"])
+
+    assert result.exit_code == 0
+    assert kept == [True]
+    assert "up --name mybox" in result.stderr
 
 
 @pytest.mark.parametrize(
@@ -766,7 +781,7 @@ def test_given_a_box_from_a_profile_when_tearing_down_then_passes_it_and_hints_w
 def test_given_a_box_whose_profile_cannot_load_when_tearing_down_then_removes_it_and_says_files_stay(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, toml: str, says: str) -> None:
     seen: list[Any] = []
 
-    async def fake_destroy(name: str, *, force: bool = False, profile: Any = None) -> list[str]:
+    async def fake_destroy(name: str, *, force: bool = False, profile: Any = None, keep_files: bool = False) -> list[str]:
         seen.append(profile("dev"))
         return []
 

@@ -81,22 +81,30 @@ async def stop_sandbox(
 
 
 async def destroy_sandbox(
-    name: str, *, force: bool = False, profile: ProfileLoader | None = None
+    name: str,
+    *,
+    force: bool = False,
+    profile: ProfileLoader | None = None,
+    keep_files: bool = False,
 ) -> list[str]:
     """Stop a sandbox and delete its persisted state.
 
     With the ``profile`` it was made from, its files in shared volumes go too, but only while
     it runs: a stopped box can't run ``rm``. Returns the files it had to leave behind.
+    ``keep_files`` leaves them on purpose (e.g. OpenCode history for a later ``up`` of the
+    same name) and returns ``[]``.
     """
-    return await _destroy(await _get(name, "remove"), name, force=force, profile=profile)
+    return await _destroy(
+        await _get(name, "remove"), name, force=force, profile=profile, keep_files=keep_files
+    )
 
 
 async def _destroy(
-    handle: Any, name: str, *, force: bool, profile: ProfileLoader | None
+    handle: Any, name: str, *, force: bool, profile: ProfileLoader | None, keep_files: bool = False
 ) -> list[str]:
     from microsandbox import SandboxStatus
 
-    made_from = _made_from(handle, name, profile)
+    made_from = None if keep_files else _made_from(handle, name, profile)
     left = made_from.per_box_files(name) if made_from is not None else []
     with wrap_errors(f"could not remove sandbox {name!r}"):
         if made_from is not None and left and handle.status == SandboxStatus.RUNNING:
