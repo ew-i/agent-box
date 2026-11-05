@@ -54,7 +54,9 @@ if TYPE_CHECKING:
     from agentbox.config import AgentProfile, WorkspaceMount
 
 HTTPS_PORT = 443
-"""Allowlisted domains are reachable over TLS only; plaintext egress stays denied."""
+"""Allowlisted domains are reachable over TLS; plaintext only with ``allow_http``."""
+
+HTTP_PORT = 80
 
 DIRECTORY_MODE = 0o755
 """Owner-writable, world-readable — the usual mode for a workspace directory."""
@@ -121,6 +123,7 @@ def _build_labels(profile: AgentProfile) -> dict[str, str]:
             "network",
             "allowed_domains",
             "allow_private_dns",
+            "allow_http",
             "tls_bypass",
             "secrets",
             "named_volumes",
@@ -193,7 +196,7 @@ def _allowlist(profile: AgentProfile, secret_hosts: Sequence[str]) -> _Egress:
     # don't trust its CA, like containers inside Docker. Non-strict matching still ties
     # the TLS hostname to an IP the guest resolved through an allowed domain.
     return _Egress(
-        _deny_by_default(_allowlist_rules(profile.allowed_domains)),
+        _deny_by_default(_allowlist_rules(profile.allowed_domains, http=profile.allow_http)),
         dns=_PRIVATE_DNS if profile.allow_private_dns else None,
         strict=False,
         tls_bypass=_tls_bypass(domain_patterns(profile.allowed_domains), secret_hosts),
@@ -236,13 +239,15 @@ def _corporate_rules() -> tuple[Rule, ...]:
     )
 
 
-def _allowlist_rules(allowed_domains: Sequence[str]) -> tuple[Rule, ...]:
-    """The base rules, then HTTPS to each allowed domain."""
+def _allowlist_rules(allowed_domains: Sequence[str], *, http: bool = False) -> tuple[Rule, ...]:
+    """The base rules, then HTTPS (and with ``http`` plain HTTP) to each allowed domain."""
+    ports = (HTTPS_PORT, HTTP_PORT) if http else (HTTPS_PORT,)
     return (
         *_base_rules(),
         *(
-            Rule.allow(protocol=Protocol.TCP, port=HTTPS_PORT, destination=_destination(domain))
+            Rule.allow(protocol=Protocol.TCP, port=port, destination=_destination(domain))
             for domain in allowed_domains
+            for port in ports
         ),
     )
 

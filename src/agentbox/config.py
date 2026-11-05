@@ -210,6 +210,12 @@ class AgentProfile(BaseModel):
     point into the private network. Only for ``allowlist``: ``corporate`` and ``unrestricted``
     always have it off, and ``public`` blocks private IPs anyway."""
 
+    allow_http: bool = False
+    """Also allow plain HTTP (TCP/80) to ``allowed_domains``, e.g. for apt mirrors. Plaintext
+    has no TLS hostname, so the match falls back to IPs the guest resolved through an allowed
+    domain: on a shared CDN IP, other sites behind it become reachable too. Only for
+    ``allowlist``; the other modes don't restrict ports."""
+
     tls_bypass: tuple[str, ...] = ()
     """Hosts that keep their real certificate once a secret turns on TLS interception, e.g.
     ``*.docker.io``. The allowlist already bypasses every allowed domain except the secret
@@ -245,6 +251,10 @@ class AgentProfile(BaseModel):
         if self.allow_private_dns and self.network is not NetworkMode.ALLOWLIST:
             raise ValueError(
                 f"allow_private_dns only applies to network = 'allowlist', not '{self.network}'"
+            )
+        if self.allow_http and self.network is not NetworkMode.ALLOWLIST:
+            raise ValueError(
+                f"allow_http only applies to network = 'allowlist', not '{self.network}'"
             )
         return self
 

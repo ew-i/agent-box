@@ -7,7 +7,7 @@ from microsandbox import Action, MountKind, Network, Protocol, Rule, VolumeKind
 
 from agentbox.config import AgentProfile, HostSecret, NetworkMode, WorkspaceMount
 from agentbox.errors import SecretNotSetError
-from agentbox.microsandbox_adapter import _EGRESS, DIRECTORY_MODE, HTTPS_PORT, to_sandbox_kwargs
+from agentbox.microsandbox_adapter import _EGRESS, DIRECTORY_MODE, HTTP_PORT, HTTPS_PORT, to_sandbox_kwargs
 from agentbox.profiles import BUILTIN_PROFILES
 
 DNS_PORT = 53
@@ -354,6 +354,19 @@ def test_given_an_allowlisted_domain_when_translating_then_permits_only_https(pr
     domain_rules = [rule for rule in network_of(profile).policy.rules if rule.destination.value == ".pypi.org"]
 
     assert [(rule.protocol, rule.port) for rule in domain_rules] == [(Protocol.TCP, HTTPS_PORT)]
+
+
+def test_given_allow_http_when_translating_then_permits_http_and_https(profile: AgentProfile) -> None:
+    with_http = profile.model_copy(update={"allow_http": True})
+    domain_rules = [rule for rule in network_of(with_http).policy.rules if rule.destination.value == ".pypi.org"]
+
+    assert {(rule.protocol, rule.port) for rule in domain_rules} == {(Protocol.TCP, HTTPS_PORT), (Protocol.TCP, HTTP_PORT)}
+
+
+def test_given_allow_http_when_labelling_then_a_restart_notices_the_change(profile: AgentProfile) -> None:
+    with_http = profile.model_copy(update={"allow_http": True})
+
+    assert to_sandbox_kwargs(with_http, "box")["labels"]["agentbox.network"] != to_sandbox_kwargs(profile, "box")["labels"]["agentbox.network"]
 
 
 def test_given_no_allowed_domains_when_translating_then_still_denies_cloud_metadata(profile: AgentProfile) -> None:

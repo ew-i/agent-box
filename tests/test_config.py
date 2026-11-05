@@ -205,6 +205,12 @@ def test_given_allow_private_dns_outside_allowlist_when_creating_a_profile_then_
         AgentProfile(name="x", network=mode, allow_private_dns=True)
 
 
+@pytest.mark.parametrize("mode", [NetworkMode.PUBLIC, NetworkMode.OFFLINE])
+def test_given_allow_http_outside_allowlist_when_creating_a_profile_then_rejects_it(mode: NetworkMode) -> None:
+    with pytest.raises(ValidationError, match="allow_http only applies to network = 'allowlist'"):
+        AgentProfile(name="x", network=mode, allow_http=True)
+
+
 def test_given_allow_private_dns_with_allowlist_when_creating_a_profile_then_accepts_it() -> None:
     assert AgentProfile(name="x", allowed_domains=(".corp.com",), allow_private_dns=True).allow_private_dns is True
 
