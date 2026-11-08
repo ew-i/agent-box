@@ -36,6 +36,7 @@ def test_given_no_options_when_creating_a_profile_then_applies_restrictive_defau
     assert profile.network is NetworkMode.ALLOWLIST
     assert profile.allowed_domains == ()
     assert profile.ephemeral is True
+    assert WorkspaceMount(host_path=Path("/tmp")).readonly is True
 
 
 def test_given_a_profile_when_assigning_a_field_then_raises_validation_error() -> None:

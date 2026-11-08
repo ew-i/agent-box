@@ -145,7 +145,7 @@ class WorkspaceMount(BaseModel):
 
     host_path: Path
     guest_path: GuestPath = "/workspace"
-    readonly: bool = False
+    readonly: bool = True
 
     @property
     def resolved_host_path(self) -> Path:

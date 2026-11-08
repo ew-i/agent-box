@@ -3,9 +3,9 @@
 #   make -f ~/code/agent-box/Makefile start
 # or with `alias box='make -f ~/code/agent-box/Makefile'`: box start, box exec, ...
 NAME ?= $(notdir $(CURDIR))
-# The project to mount, by default the folder you run make from. The agent can write to it,
-# .git hooks included, which run on the host. READONLY=1 mounts it read-only, which even root
-# in the box can't undo.
+# The project to mount, by default the folder you run make from. Mounts are read-only unless
+# the `dev` profile explicitly sets workspace.readonly = false. Writable mounts expose .git
+# hooks/config that may run on the host. READONLY=1 explicitly requests a read-only mount.
 WORKSPACE ?= $(CURDIR)
 READONLY ?=
 # Optional: loaded when it exists, e.g. one line OPENROUTER_API_KEY=sk-or-... (chmod 600 it).

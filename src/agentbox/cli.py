@@ -41,10 +41,12 @@ ConfigOption = Annotated[
 
 WorkspaceOption = Annotated[
     Path | None,
-    typer.Option("--workspace", "-w", help="Host directory to mount at /workspace."),
+    typer.Option(
+        "--workspace", "-w", help="Host directory to mount at /workspace, read-only by default."
+    ),
 ]
 
-ReadonlyOption = Annotated[bool, typer.Option("--readonly", help="Mount the workspace read-only.")]
+ReadonlyOption = Annotated[bool, typer.Option("--readonly", help="Mark the workspace read-only.")]
 
 NetworkOption = Annotated[
     NetworkMode | None,

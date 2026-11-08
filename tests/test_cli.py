@@ -224,8 +224,8 @@ def test_given_a_failing_command_when_running_then_propagates_its_exit_code(reco
     assert result.exit_code == 3
 
 
-def test_given_a_readonly_workspace_when_running_then_mounts_it_readonly(tmp_path: Path, recorder: Recorder) -> None:
-    result = runner.invoke(main, ["run", "airgapped", "ls", "--workspace", str(tmp_path), "--readonly"])
+def test_given_a_workspace_when_running_then_mounts_it_readonly_by_default(tmp_path: Path, recorder: Recorder) -> None:
+    result = runner.invoke(main, ["run", "airgapped", "ls", "--workspace", str(tmp_path)])
 
     assert result.exit_code == 0
     workspace = recorder.profiles[0].workspace
@@ -236,7 +236,10 @@ def test_given_a_readonly_workspace_when_running_then_mounts_it_readonly(tmp_pat
 def test_given_a_profile_workspace_when_running_readonly_then_mounts_it_readonly(tmp_path: Path, recorder: Recorder) -> None:
     """--readonly without --workspace must protect the profile's own mount, not be ignored."""
     config = tmp_path / "profiles.toml"
-    config.write_text(f'[profiles.mine]\nworkspace = {{ host_path = "{tmp_path}" }}\n', encoding="utf-8")
+    config.write_text(
+        f'[profiles.mine]\nworkspace = {{ host_path = "{tmp_path}", readonly = false }}\n',
+        encoding="utf-8",
+    )
 
     result = runner.invoke(main, ["run", "mine", "ls", "--readonly", "--config", str(config)])
 
@@ -249,7 +252,10 @@ def test_given_a_profile_workspace_when_running_readonly_then_mounts_it_readonly
 def test_given_a_profile_workspace_at_its_own_guest_path_when_running_with_a_workspace_then_keeps_that_path(tmp_path: Path, recorder: Recorder) -> None:
     """--workspace swaps the host folder only; the profile's workdir may point at its guest path."""
     config = tmp_path / "profiles.toml"
-    config.write_text(f'[profiles.mine]\nworkdir = "/src"\nworkspace = {{ host_path = "{tmp_path}", guest_path = "/src" }}\n', encoding="utf-8")
+    config.write_text(
+        f'[profiles.mine]\nworkdir = "/src"\nworkspace = {{ host_path = "{tmp_path}", guest_path = "/src", readonly = false }}\n',
+        encoding="utf-8",
+    )
     other = tmp_path / "other"
     other.mkdir()
 
@@ -258,6 +264,7 @@ def test_given_a_profile_workspace_at_its_own_guest_path_when_running_with_a_wor
     assert result.exit_code == 0, result.output
     workspace = recorder.profiles[0].workspace
     assert (workspace.host_path, workspace.guest_path) == (other, "/src")
+    assert workspace.readonly is False
 
 
 def test_given_a_readonly_profile_workspace_when_running_with_another_workspace_then_keeps_it_readonly(tmp_path: Path, recorder: Recorder) -> None:

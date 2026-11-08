@@ -1,66 +1,99 @@
 # agent-box
 
-Sandboxed execution environments for coding agents, backed by
-[microsandbox](https://microsandbox.dev/) microVMs.
-
 [![build](https://github.com/ew-i/agent-box/actions/workflows/deploy.yml/badge.svg)](https://github.com/ew-i/agent-box/actions/workflows/deploy.yml) [![coverage](https://raw.githubusercontent.com/ew-i/badges/main/agent-box/coverage.svg)](https://github.com/ew-i/agent-box) [![codeql](https://github.com/ew-i/agent-box/actions/workflows/codeql.yml/badge.svg)](https://github.com/ew-i/agent-box/actions/workflows/codeql.yml) ![Python](https://img.shields.io/badge/python-3.11_%E2%80%93_3.15-yellow?labelColor=blue)
 
-`agentbox` boots microVMs from **declarative profiles**: image, CPU/memory, lifetime,
-workspace mount and network policy. Each sandbox has its own kernel, so generated code can't
-escape the way a container breakout can.
+`agentbox` runs coding agents and their generated code inside [microsandbox](https://microsandbox.dev/) microVMs. Declarative profiles define each VM's image, resources, workspace, lifetime, secrets, storage, and network policy. Each sandbox has its own kernel, providing a stronger isolation boundary than a container alone.
 
-**The workspace is the exception.** The agent can write `.git/`, and a hook in `.git/hooks/`
-or a `core.fsmonitor` in `.git/config` runs on the host the next time you (or your shell
-prompt) run git there. Use `--readonly` when the agent only needs to read (host-enforced,
-even against root in the box); otherwise check `.git/hooks` and `.git/config` first.
+## Key features
 
-`--readonly` doesn't cover the home volume, which all `agent-box` boxes share. Give an
-untrusted project its own: `named_volumes = { "/home/agent-box" = "agent-box-home-untrusted" }`.
+- One-shot commands (`run`) and persistent development boxes (`up`, `start`, `stop`, `down`).
+- Built-in and TOML-defined profiles, with validated per-run overrides.
+- Offline, allowlisted, public, corporate, and unrestricted network modes.
+- Host-held secrets that are only substituted into approved HTTPS request headers and destinations.
+- A Debian-based coding image with mise-managed toolchain presets, plus optional PHP and Docker-in-the-sandbox images.
 
-## Setup
+> [!CAUTION]
+> **Workspace mounts are read-only by default.** To let an agent edit a checkout, explicitly set `readonly = false` in that profile's `workspace` settings. A writable mount lets the agent change `.git/hooks/` or set `core.fsmonitor` in `.git/config`; those can execute on the host the next time Git (or a shell prompt) runs there.
+>
+> Read-only applies only to the workspace, not named volumes. The built-in `agent-box` profiles share `/home/agent-box` across boxes, which may contain agent logins, history, and toolchains. For an untrusted project, assign it a separate named home volume in a custom profile.
 
-Requires Python 3.11+, [uv](https://docs.astral.sh/uv/), and Linux with KVM or macOS on
-Apple Silicon (check with `msb doctor`).
+## Contents
+
+- [Requirements and installation](#requirements-and-installation)
+- [Quick start](#quick-start)
+- [Commands and box lifecycle](#commands-and-box-lifecycle)
+- [Profiles and configuration](#profiles-and-configuration)
+- [Network and secrets](#network-and-secrets)
+- [Storage and isolation](#storage-and-isolation)
+- [The `agent-box` images](#the-agent-box-images)
+- [Development and tests](#development-and-tests)
+- [Deployment and package builds](#deployment-and-package-builds)
+- [Project layout](#project-layout)
+- [Troubleshooting](#troubleshooting)
+- [References and license](#references-and-license)
+
+## Requirements and installation
+
+- Python 3.11 or later and [uv](https://docs.astral.sh/uv/).
+- A supported microsandbox host: Linux with KVM, or macOS on Apple Silicon. Run `msb doctor` to check the runtime and host setup.
+- Docker is optional; it is needed only to build the bundled images.
+
+From a clone of this repository, install the editable CLI and the `msb` executable:
 
 ```bash
 uv tool install --editable . --with-executables-from microsandbox
 agentbox profiles
 ```
 
-This puts `agentbox` and `msb` in `~/.local/bin`. A `git pull` takes effect at once; after a
-dependency change, rerun with `--reinstall`.
-
-To load secrets from `~/.config/agentbox/.env`, add to your shell rc:
+The install adds `agentbox` and `msb` to `~/.local/bin`. After pulling source changes, the editable CLI uses the updated code immediately. If dependencies changed, reinstall with `--reinstall`:
 
 ```bash
-agentbox() { (set -a; [ -f ~/.config/agentbox/.env ] && . ~/.config/agentbox/.env; command agentbox "$@") }
+uv tool install --editable . --with-executables-from microsandbox --reinstall
 ```
 
-Or copy `Makefile.example` to `Makefile` and run `make -f ~/code/agent-box/Makefile start`
-from a project: it mounts that folder, names the box after it, and loads the `.env`.
+To load secrets from `~/.config/agentbox/.env` when invoking `agentbox` directly, add this function to your shell rc file:
 
-## Usage
+```bash
+agentbox() { (set -a; [ -f ~/.config/agentbox/.env ] && . ~/.config/agentbox/.env; command agentbox "$@"); }
+```
 
-One-shot (boot, run, tear down):
+The `.env` file is sourced as shell code; keep it private and use only trusted contents.
+
+The development setup using `uv sync` is described under [Development and tests](#development-and-tests).
+
+## Quick start
+
+Run a command in a fresh, offline Python sandbox:
 
 ```bash
 agentbox run airgapped 'python -c "print(1)"'
-agentbox run airgapped 'ls /workspace' -w ./my-project
 ```
 
-Long-lived:
+Mount a project folder at `/workspace` for the command:
+
+```bash
+agentbox run airgapped 'ls -la /workspace' --workspace ./my-project
+```
+
+The `airgapped` profile above uses a registry image, so it is the quickest first check. To start a persistent box from this repository's `agent-box` image, run these from the repository root (the directory containing `Dockerfile`) to build it with Docker and load it into microsandbox:
+
+```bash
+docker build -t agent-box .
+docker save agent-box | msb image load -t agent-box
+```
+
+Then start and connect to the box. Its workspace mount is read-only; see [Defining a profile](#defining-a-profile) to explicitly allow writes.
 
 ```bash
 cd ~/code/my-app
-agentbox up agent-box --name my-app -w .
+agentbox up agent-box --name my-app --workspace .
 msb exec my-app -- bash -l
-agentbox ls
-agentbox stop my-app                     # stop, keep state
-agentbox start my-app                    # start again, rerun setup_script
-agentbox down my-app                     # stop + delete state
+agentbox stop my-app       # keep its state
+agentbox start my-app      # start it again and rerun setup_script
+agentbox down my-app       # delete its state
 ```
 
-`up` prints only the sandbox name on stdout, so it scripts well:
+`agentbox up` prints the box name on stdout, so it can be captured by scripts. Hints go to stderr:
 
 ```bash
 BOX=$(agentbox up airgapped)
@@ -68,138 +101,243 @@ msb exec "$BOX" -- python -c "print('hi')"
 agentbox down "$BOX"
 ```
 
-`up` with the name of a stopped box restarts it with its original settings. It refuses if
-the profile, workspace, `--readonly`, `--network`, or the profile's `network`,
-`allowed_domains`, `allow_private_dns`, `allow_http`, `tls_bypass`, `secrets` or `named_volumes` changed;
-`agentbox down` first. Rotated secrets and new time limits also need a `down`.
-
-`agentbox start NAME` restarts a stopped box as created and reruns `setup_script`, which
-`msb start` skips. `agentbox stop` on a `run` box removes it. Box and profile names use
-letters, digits, `.`, `_` and `-`, starting with a letter or digit.
-
-`show` prints the resolved profile (`env` values masked) and takes the same flags as `run`
-and `up`:
+For a project-oriented shortcut, `Makefile.example` expects a profile named `dev` and runs from the project directory:
 
 ```bash
-agentbox show airgapped -w ./my-project --readonly -n public
-agentbox show airgapped --for up
+make -f /path/to/agent-box/Makefile.example start
+make -f /path/to/agent-box/Makefile.example exec
 ```
 
-### `run` vs `up`
+It also provides `stop` and `del` targets (`del` removes the box). By default it sources `~/.config/agentbox/.env` if present; that file is trusted shell code, so keep it private and use it only for values you trust. `NAME`, `WORKSPACE`, `READONLY` (which repeats the read-only default), and `ENV_FILE` can be overridden on the make command line. Writes require `readonly = false` in the `dev` profile.
 
-|                   | `run`                          | `up`                                     |
-|-------------------|--------------------------------|------------------------------------------|
-| Script argument   | required                       | none, connect with `msb exec`            |
-| Lifetime          | ends with the command          | until `agentbox down`                    |
-| Idle / max limits | profile's, unless flags given  | none, unless you pass the flags          |
-| `ephemeral`       | `True` (profile default)       | forced `False`, so state survives a stop |
+## Commands and box lifecycle
 
-`--idle-timeout` stops an unused box, `--max-duration` stops it regardless; `0` disables
-either:
+| Command | What it does |
+| --- | --- |
+| `agentbox run PROFILE SCRIPT` | Start a fresh box, run a shell snippet, stream its output, then stop the box. The default profile behavior also removes it. |
+| `agentbox up PROFILE` | Start a detached, persistent box. Connect with `msb exec`. |
+| `agentbox start NAME` | Restart a stopped `up` box and rerun its profile's `setup_script`. |
+| `agentbox stop NAME` | Stop a box while keeping its state when possible. A default ephemeral `run` box is removed instead. |
+| `agentbox down NAME` | Stop and delete the box and its persistent state. |
+| `agentbox ls` | List sandboxes known to the microsandbox runtime. |
+| `agentbox profiles` | List built-in and configured profiles. |
+| `agentbox show PROFILE` | Print the resolved profile as JSON; values in `env` are masked. |
+| `agentbox version` | Print the installed version. |
+
+`run` and `up` accept `--workspace`/`-w`, `--readonly`, `--network`/`-n`, `--idle-timeout`, `--max-duration`, and `--config`/`-c`. A workspace supplied on the command line is read-only by default; write access is configured explicitly in the profile. `run` also accepts `--timeout`, which limits the command itself. `up` also accepts `--name`; names may contain letters, digits, `.`, `_`, and `-`, must start with a letter or digit, and may be at most 128 characters. `show` accepts the same profile overrides and `--for run|up`; `profiles`, `start`, `stop`, and `down` accept `--config`. `stop` and `down` accept `--force` to kill instead of stopping gracefully; `down` also accepts `--keep-history`.
+
+For example, preview the profile after applying flags without booting a sandbox:
 
 ```bash
-agentbox up agent-box --name capped --idle-timeout 600 --max-duration 7200
+agentbox show agent-box --workspace ./my-app --network public
+agentbox show agent-box --for up --max-duration 7200
 ```
 
-## The `agent-box` image
+`--idle-timeout` stops an unused box; `--max-duration` stops it after the specified total lifetime, even if busy. Both accept seconds, and `0` disables that limit.
 
-Debian 13, dev tools, [mise](https://mise.jdx.dev) for toolchains, and coding agents. Rebuild
-and reload after every change to the `Dockerfile` or `mise/`:
+### `run` versus `up`
+
+| | `run` | `up` |
+| --- | --- | --- |
+| Command | Required shell snippet | No snippet; connect with `msb exec` |
+| State | Stops after the command; the default `ephemeral = true` removes it | Kept until `agentbox down` |
+| Time limits | Uses the profile's limits unless overridden | No limits by default; set them explicitly if desired |
+| Failure/stop behavior | A default ephemeral box is removed when stopped; `ephemeral = false` keeps stopped state | `stop` keeps it for a later `start` |
+
+A stopped box brought up again with the same name uses its saved runtime settings. New command-line values or edited profiles do not replace those settings. `up` detects changes to the profile name, workspace, and stored network/home-volume settings; if it reports a conflict—or if you need to apply changed settings—remove the box with `agentbox down NAME` and create it again. Rotated secrets and changed time limits also require recreating the box.
+
+`agentbox start NAME` starts a stopped box using its saved VM state and reruns `setup_script`. Use it instead of `msb start` for an agentbox-managed box; `msb start` does not rerun the profile setup script (for example, it will not restart dockerd in the Docker image).
+
+## Profiles and configuration
+
+Profiles are TOML data. User-defined profiles are merged with the built-ins and override a built-in with the same name. `agentbox` does not write or modify the profile file.
+
+Review profile files before using them: `setup_script` is executed inside the VM after boot. A project `mise.toml` can also run code once trusted; see [Toolchain presets](#toolchain-presets).
+
+Configuration lookup order:
+
+1. `--config` / `-c` on the command.
+2. `$AGENTBOX_CONFIG`.
+3. `$XDG_CONFIG_HOME/agentbox/profiles.toml`, if `XDG_CONFIG_HOME` is an absolute path.
+4. `~/.config/agentbox/profiles.toml`.
+
+A missing default file means “built-ins only.” A missing file explicitly named with `--config` or `AGENTBOX_CONFIG` is an error. Invalid TOML and unknown profile fields are reported with the file and field name.
+
+The repository includes a sample profile at [`.config/agentbox/profiles.toml.example`](.config/agentbox/profiles.toml.example). To use it as your default config:
+
+```bash
+mkdir -p ~/.config/agentbox
+cp .config/agentbox/profiles.toml.example ~/.config/agentbox/profiles.toml
+```
+
+It defines a `dev` profile for the `agent-box:php-docker` image, with an allowlisted network, an OpenRouter secret, and an explicitly writable workspace for the Makefile helper. Build and load that image first, and provide `OPENROUTER_API_KEY` in the host environment; the example file intentionally contains no key value. The [Makefile helper](#quick-start) can load that variable from `~/.config/agentbox/.env`.
+
+### Built-in profiles
+
+| Profile | Image | Network | Other settings |
+| --- | --- | --- | --- |
+| `airgapped` | `python:3.11-slim` | `offline` | Safest built-in for code that needs no network. |
+| `agent-box` | `agent-box` | `public` | 4 CPUs, 4096 MiB memory, shared `agent-box-home` volume, 2-hour maximum for `run`. |
+| `agent-box-php-docker` | `agent-box:php-docker` | `public` | Same home and resource settings; includes PHP and Docker Engine with a per-box Docker data disk. |
+
+Profile defaults, unless a profile overrides them: image `python:3.11-slim`, 2 CPUs, 2048 MiB memory, workdir `/workspace`, shell `/bin/bash`, `network = "allowlist"`, no allowed domains, 600-second idle timeout, 3600-second maximum duration, and `ephemeral = true`. The built-in `agent-box` profiles have their own explicit settings.
+
+### Defining a profile
+
+Save this as `~/.config/agentbox/profiles.toml`:
+
+```toml
+[profiles.rust]
+image = "rust:1-slim"
+cpus = 8
+memory_mib = 8192
+network = "allowlist"
+allowed_domains = [".crates.io", ".static.crates.io", ".static.rust-lang.org"]
+setup_script = "rustup component add clippy"
+
+[profiles.rust.workspace]
+host_path = "~/code/my-rust-project"
+guest_path = "/workspace"
+readonly = false
+```
+
+Run it:
+
+```bash
+agentbox run rust 'cargo test' --workspace ~/code/my-rust-project
+agentbox up rust --name rust-work --workspace ~/code/my-rust-project
+```
+
+The profile table key is the profile name. Profile names start with a letter or digit, may contain letters, digits, `.`, `_`, and `-`, and are at most 64 characters. Runtime box names follow the same character rule and are at most 128 characters. The host workspace path may be relative or use `~`; paths that mount the home directory itself or a parent containing it are refused. A workspace can have a different absolute guest path, but it cannot share a guest mount path with a named volume or disk.
+
+### Profile fields
+
+Guest paths (`workdir`, workspace/volume/disk paths) must be absolute.
+
+| Field | Meaning / default |
+| --- | --- |
+| `description` | Optional text shown by `agentbox profiles`. |
+| `image` | VM image; defaults to `python:3.11-slim`. |
+| `cpus`, `memory_mib` | Resources; defaults to `2` CPUs and `2048` MiB. Valid ranges are 1–32 CPUs and 256–65536 MiB. |
+| `workdir`, `shell` | Guest working directory and shell; default `/workspace` and `/bin/bash`. |
+| `workspace` | Optional host bind mount: `host_path`, optional `guest_path` (default `/workspace`) and `readonly` (default `true`). Set `false` explicitly to allow writes. |
+| `env` | Environment variables passed into the guest. Do not put API keys here; the guest can read them. `{sandbox}` in a value is replaced with the box name. |
+| `network`, `allowed_domains` | Egress mode and domains for `allowlist`; default mode is `allowlist` with no allowed domains. |
+| `allow_private_dns`, `allow_http` | Extra allowlist behavior; both default to `false` and only apply to `allowlist`. See [Network and secrets](#network-and-secrets). |
+| `tls_bypass` | Hosts that keep their real TLS certificate when secret substitution enables TLS inspection. |
+| `secrets` | Host environment variables permitted for substitution only to declared hosts and a single request header (`authorization` by default; set `header` to change it). |
+| `named_volumes` | Guest path → named volume. A named volume is shared by every box that names it. |
+| `disks` | Guest path → owned ext4 disk size in MiB. The disk belongs to one box and is deleted with it. |
+| `idle_timeout_s`, `max_duration_s` | Automatic idle and total lifetime limits in seconds; defaults `600` and `3600`. `0` means no limit. |
+| `ephemeral` | Whether stopping removes the box; default `true`. `up` forces it to `false`. |
+| `setup_script` | Optional shell snippet run after each boot, including when `agentbox start` restarts a box. |
+
+## Network and secrets
+
+| Mode | Access |
+| --- | --- |
+| `offline` | No egress. Local `exec` and filesystem operations still work. Secrets are inactive. |
+| `allowlist` | DNS plus TCP/443 to `allowed_domains` only. A leading dot, such as `.example.com`, allows the domain and its subdomains. Other traffic is denied by default. |
+| `public` | Public internet; private, host-local, and metadata ranges are blocked. |
+| `corporate` | Public and private networks, for example an intranet behind a VPN; the host and metadata remain blocked. DNS rebind protection is off. |
+| `unrestricted` | All destinations, including the host. Use only for local debugging. |
+
+In `allowlist` mode, `allowed_domains` accepts exact hostnames or a leading dot for the domain and its subdomains; `*` wildcards are not supported. `allow_http = true` also permits TCP/80 to allowed domains. Plain HTTP has no TLS hostname to check, so it is matched by resolved IP; other sites sharing a CDN IP can consequently be reachable over HTTP. `allow_private_dns = true` permits allowlisted names to resolve to private IPs and disables DNS rebinding protection for the sandbox. Use it only when that tradeoff is understood.
+
+### Passing API keys safely
+
+Declare secrets in a profile, without storing their values in TOML:
+
+```toml
+[profiles.agent]
+image = "agent-box"
+network = "allowlist"
+allowed_domains = ["openrouter.ai"]
+secrets = { OPENROUTER_API_KEY = { hosts = ["openrouter.ai"] } }
+```
+
+Set `OPENROUTER_API_KEY` in the host environment before starting the box, using your local secret manager or another protected method. The variable name in `secrets` identifies the host variable to read. The guest sees a placeholder; microsandbox substitutes the value into the configured request header (default `authorization`) only for the declared hosts and blocks that placeholder from being sent elsewhere. A missing host variable prevents startup.
+
+Every secret host must be reachable by the profile's network policy. In `allowlist` mode it must also appear in `allowed_domains`. A secret host cannot be listed in `tls_bypass`, because bypassed HTTPS traffic is not inspected and cannot receive the value. Do not pass keys with `msb exec -e`, put them in `env`, or mount host credential directories such as `~/.ssh`, `~/.aws`, `~/.config/gcloud`, `~/.kube`, or `~/.claude`.
+
+For Git over HTTPS, use a fine-grained token supplied as a secret and configure `gh auth setup-git` inside the box; do not mount host credentials.
+
+## Storage and isolation
+
+- **Workspace:** A host directory is mounted at `/workspace` by `--workspace`/`-w`, or at the profile's `workspace.guest_path`. It is read-only by default; set `workspace.readonly = false` in the profile to allow writes. `--readonly` requires a workspace mount and is enforced by the host mount, including against root in the VM.
+- **Named volumes:** Shared between boxes that use the same volume name. The built-in `agent-box` profiles share `agent-box-home`, preserving agent logins and installed mise toolchains across `stop` and `down`. Per-box history such as OpenCode's database is deleted by default on `down` unless `--keep-history` is used.
+- **Owned disks:** Ext4 disks belong to one box, persist across `stop`/`start`, and are deleted with the box. The Docker image uses one for `/var/lib/docker` because Docker cannot use the VM's overlay filesystem as its data root.
+- **Per-box files:** Put files that should live in a shared volume but remain separate for each box under a path containing `{sandbox}` in an `env` value. The built-in image does this for OpenCode's SQLite database; the name is replaced at boot. `agentbox down` removes these files when it can. `agentbox down NAME --keep-history` preserves them so `agentbox up PROFILE --name NAME` can reuse them. If a box is already stopped, its files cannot be cleaned from inside it and may remain in the volume.
+
+OpenCode's database is per box because multiple microVMs cannot safely share one SQLite database. OpenCode background services are disabled in the seeded home because multiple boxes share that home and would otherwise stop one another.
+
+For a separate home on a custom profile, keep the image's setup script and give the volume a unique name:
+
+```toml
+[profiles.untrusted]
+image = "agent-box"
+network = "offline"
+named_volumes = { "/home/agent-box" = "agent-box-home-untrusted" }
+env = { OPENCODE_DB = "/home/agent-box/.local/share/opencode/opencode-{sandbox}.db" }
+setup_script = "agent-box-entrypoint true"
+```
+
+Choose the network mode to fit the task; `offline` avoids egress, while `public` permits internet access but still blocks private and host-local ranges.
+
+## The `agent-box` images
+
+The default image is based on Debian 13 and includes Git, curl, CA certificates, ripgrep, `fd-find`, jq, less, nano, htop, vim, sudo, unzip, procps, rsync, and build tools. The `agent-box` user has passwordless sudo inside the VM. Node.js and GitHub CLI are installed via mise, along with Claude Code and OpenCode. More language toolchains are installed on first use into the persistent home volume. Microsandbox named volumes start empty; the image includes a seed home that `agent-box-entrypoint` copies into a new home without overwriting existing files. To build and load the image for microsandbox:
 
 ```bash
 docker build -t agent-box .
 docker save agent-box | msb image load -t agent-box
 ```
 
-To verify the reload, compare layers from `docker image inspect` and `msb image inspect`
-(`msb image ls` CREATED doesn't change).
-
-**Agents:** uncomment them in the `Coding agents` section of the `Dockerfile` (Claude Code
-and opencode are on by default), or add a `RUN` line. They install into `~/.local`, so they
-can self-update.
-
-| Build arg               | Default   | Effect                                                                    |
-|-------------------------|-----------|---------------------------------------------------------------------------|
-| `MISE_VERSION`          | `2026.10` | Latest mise of that month                                                 |
-| `PHP_VERSION`           | `8.5`     | PHP CLI from [Sury](https://packages.sury.org/php/) (PHP image only)      |
-| `COMPOSER_VERSION`      | `2`       | Latest Composer of that major (PHP image only)                            |
-| `USER_UID` / `USER_GID` | `1000`    | Owner of files the agent creates                                          |
-
-### Working in it
-
-Log in to your agents once and set your git identity. `/home/agent-box` is the named volume
-`agent-box-home`, shared by every `agent-box` box and kept across `down`, so logins,
-history and toolchains carry over.
-
-Exception: OpenCode's database is per box (`OPENCODE_DB=…/opencode-{sandbox}.db`), since
-SQLite can't lock across microVMs. Custom profiles on `agent-box-home` need that `env` line
-too. `{sandbox}` in an `env` value becomes the box name; such a file in a named volume (plus
-`-wal`/`-shm`) is deleted when a `run` box ends, or by `agentbox down` on a running box (a
-stopped box lists the files left behind). `agentbox down NAME --keep-history` keeps them, so
-`agentbox up --name NAME` picks the history up again. Boxes created before this setting keep the shared
-database until recreated. A new home also gets `~/.config/opencode/service.json` with
-`"disabled": true`, since background services of two boxes would stop each other.
-
-microsandbox volumes start empty, so the image keeps its home in `/opt/agent-box-home` and
-`agent-box-entrypoint` copies it into the volume until complete (`~/.agent-box-seeded`),
-never overwriting existing files. `setup_script` runs the entrypoint on every boot, since
-`Sandbox.create` skips the image entrypoint. Networking is `public`: mise downloads from too
-many hosts for an allowlist.
+Rebuild and load again after changing `Dockerfile` or `mise/`. Other agent installation lines are commented in the Dockerfile and can be enabled there. Installed agents live under the home volume and can self-update. A newly added agent will not appear in an already seeded home automatically.
 
 ### Toolchain presets
 
-mise installs toolchains on first use into the home volume. Node.js and `gh` are always on;
-the rest are selected with `MISE_ENV`:
+Node.js and `gh` are always installed. Select other mise toolchains with `MISE_ENV`:
 
-| Preset   | Tools                                                    |
-|----------|----------------------------------------------------------|
-| `java`   | Temurin JDK 27, Maven, Gradle, jbang                     |
-| `go`     | Go, golangci-lint                                        |
-| `node`   | corepack (`yarn`, `pnpm` per `packageManager`), bun      |
-| `python` | Python 3.14, uv                                          |
+| Preset | Tools |
+| --- | --- |
+| `java` | Temurin JDK, Maven, Gradle, jbang |
+| `go` | Go and golangci-lint |
+| `node` | corepack (Yarn/pnpm follow the project's `packageManager` pin) and bun |
+| `python` | Python and uv |
 
 ```bash
 msb exec -e MISE_ENV=java,go my-app -- agent-box-entrypoint bash -l
 ```
 
-To make it permanent, copy the `agent-box` profile into your `profiles.toml` with
-`env = { MISE_ENV = "java,go", OPENCODE_DB = "/home/agent-box/.local/share/opencode/opencode-{sandbox}.db" }`.
-The first start with a new preset takes up to a minute. Presets are pinned mise configs in
-[`mise/`](mise/); add e.g. `mise/config.rust.toml` and rebuild. No `python3` without the
-`python` preset.
+To make a preset permanent, add the `MISE_ENV` setting to the profile's `env` table. Tool versions are pinned in [`mise/`](mise/); add a config such as `mise/config.rust.toml` and rebuild to add another preset. There is no `python3` in the base image unless the `python` preset is selected.
 
-A project's `mise.toml` overrides presets but can run code, so mise ignores it until
-trusted: read it, then `mise trust && mise install`.
+A project `mise.toml` can run code. Review it before trusting it, then run `mise trust` and `mise install` inside the box.
 
 ### PHP image
 
-mise can only compile PHP from source, so PHP is a separate image from Sury's packages:
+Build the PHP variant from Sury packages and load it into microsandbox:
 
 ```bash
 docker build --target php -t agent-box:php .
 docker save agent-box:php | msb image load -t agent-box:php
 ```
 
-Use it with `image = "agent-box:php"`. Includes bcmath, curl, gd, imagick, intl, mbstring,
-mysql, readline, redis, sqlite3, xml and zip; add more to the `apt-get install` line (e.g.
-`php${PHP_VERSION}-pgsql`).
+It includes Composer and PHP extensions for bcmath, curl, gd, imagick, intl, mbstring, MySQL, readline, Redis, SQLite, XML, and zip. Add more PHP packages in the `php` stage of the Dockerfile if required.
 
-**Xdebug** is installed but not loaded (it slows PHP ~60 %). Use
-`with-xdebug php artisan test --coverage`, or `PHP_INI_SCAN_DIR=:/etc/php/xdebug.d` for a
-shell. Step debugging needs `network = "unrestricted"` and
-`XDEBUG_CONFIG="client_host=<host address>"`.
+Xdebug is installed but disabled by default because it slows PHP. Enable it for one command with `with-xdebug php artisan test --coverage`, or for a shell with `PHP_INI_SCAN_DIR=:/etc/php/xdebug.d`. Step debugging also requires the sandbox to reach the debug host; configure the network and `XDEBUG_CONFIG="client_host=<host address>"` accordingly.
 
-### Docker inside the sandbox
+### Docker inside a sandbox
 
-The `docker` target adds Docker Engine; `agent-box-php-docker` boots it on the PHP image:
+The `docker` image target adds Docker Engine. To build the PHP + Docker image used by the `agent-box-php-docker` profile:
 
 ```bash
 docker build --target docker --build-arg DOCKER_BASE=php -t agent-box:php-docker .
 docker save agent-box:php-docker | msb image load -t agent-box:php-docker
-agentbox up agent-box-php-docker --name my-app -w ~/code/my-app
+agentbox up agent-box-php-docker --name my-app --workspace ~/code/my-app
 ```
 
-A custom profile needs both `setup_script` and `disks`:
+The built-in profile starts dockerd on boot and assigns `/var/lib/docker` a private 20 GiB disk. `agentbox start` reruns the startup script after a stop. If you define your own Docker profile, configure both `setup_script` and `disks`:
 
 ```toml
 [profiles.docker]
@@ -213,153 +351,99 @@ disks = { "/var/lib/docker" = 20480 }
 setup_script = "agent-box-entrypoint agent-box-start-dockerd"
 ```
 
-- `setup_script` starts dockerd via [`start-dockerd.sh`](start-dockerd.sh); on failure the
-  boot fails with the tail of `/tmp/dockerd.log`.
-- `disks` gives `/var/lib/docker` a sparse 20 GiB ext4 disk, since Docker can't run on the
-  overlayfs root. It survives a stop; `agentbox down` deletes it.
+Docker-in-Docker in an ordinary Docker container requires a privileged container. The microsandbox profile runs inside a VM and does not need that outer Docker setup.
 
-Restart with `agentbox start`, not `msb start` (which skips `setup_script`, leaving dockerd
-down; fix with `msb exec my-app -- agent-box-start-dockerd`).
+### Image build arguments and updates
 
-### Updating
+| Build argument | Default | Applies to |
+| --- | --- | --- |
+| `MISE_VERSION` | `2026.10` | mise release month |
+| `PHP_VERSION` | `8.5` | PHP image |
+| `COMPOSER_VERSION` | `2` | PHP image |
+| `USER_UID`, `USER_GID` | `1000` | Guest account IDs, useful for matching host file ownership on Linux |
+| `CLAUDE_CODE_VERSION` | `2.1.312` | Default-installed Claude Code |
+| `OPENCODE_VERSION` | `2.2.1` | Default-installed OpenCode |
 
-- **Agents:** inside the box (`claude update`, `opencode update`).
-- **Toolchains:** bump versions in `mise/*.toml` and rebuild. `mise outdated --bump` lists
-  newer ones, `mise prune` cleans up.
-- **apt packages** are pinned to the [snapshot.debian.org](https://snapshot.debian.org) date
-  of the pinned `debian:trixie` digest. Bump the digest and update the pins
-  (`apt-cache policy <package>`). Sury has no snapshot, so only the PHP minor is pinned.
-- `docker build --pull --no-cache -t agent-box .` picks up the newest mise and Composer.
+Update agents inside a box (`claude update`, `opencode update`). To update base packages or toolchains, change the Dockerfile or `mise/` pins, rebuild, and reload the image. The base Debian packages use a pinned Debian snapshot; bumping the base image digest is part of updating those pins. Rebuilding the image does not overwrite an already seeded home volume.
 
-The home volume is seeded once, so an agent added to the `Dockerfile` later must be installed
-inside the box, or reset the volume with `msb volume rm agent-box-home`.
+## Development and tests
 
-### Secrets
-
-Put API keys in `secrets`, not `env`. The value comes from the host variable of the same
-name at boot:
-
-```toml
-secrets = { OPENROUTER_API_KEY = { hosts = ["openrouter.ai"] } }
-```
-
-The guest sees only a placeholder. microsandbox swaps in the real key in the `Authorization`
-header (or `header = "..."`) of HTTPS requests to `hosts` and blocks the placeholder going
-anywhere else. Hosts in `tls_bypass` keep their real certificate (e.g. for containers in
-Docker) but are never inspected.
-
-With `allowlist`, every allowed domain except secret hosts is bypassed automatically, and
-secret hosts must be in `allowed_domains`. With other modes, list bypasses yourself:
-
-```toml
-network = "public"
-tls_bypass = ["*.docker.io", "*.docker.com"]
-```
-
-A profile is invalid (exit 2) if a secret host is missing from the allowlist or is in
-`tls_bypass`, or a name is in both `env` and `secrets`. Boot fails if the variable isn't
-set. `offline` skips secrets.
-
-Don't pass keys with `msb exec -e` (the guest sees them) or mount host credential folders
-(`~/.ssh`, `~/.aws`, `~/.config/gcloud`, `~/.kube`, `~/.claude`). For git push, use HTTPS with
-a fine-grained token, e.g. `GH_TOKEN` plus `gh auth setup-git`.
-
-## Profiles
-
-Built-ins (`src/agentbox/profiles.py`):
-
-| Profile                | Image                                                             | Network |
-|------------------------|-------------------------------------------------------------------|---------|
-| `airgapped`            | `python:3.11-slim`                                                | offline |
-| `agent-box`            | `agent-box` ([built here](#the-agent-box-image))                  | public  |
-| `agent-box-php-docker` | `agent-box:php-docker` ([built here](#docker-inside-the-sandbox)) | public  |
-
-Network modes:
-
-- `offline`: no egress; `exec` and `fs` still work.
-- `allowlist`: DNS and TCP/443 to `allowed_domains` only (leading dot = subdomains too),
-  matched by TLS hostname on IPs resolved from an allowed domain. Metadata stays blocked.
-  Plain HTTP (e.g. Debian's apt mirrors) is blocked unless `allow_http = true`, which also
-  opens TCP/80 to `allowed_domains`; with no TLS hostname to check, that matches by resolved
-  IP only, so other sites sharing a CDN IP become reachable over HTTP too.
-- `public`: public internet; private, host-local and metadata ranges blocked.
-- `corporate`: public plus private networks (e.g. VPN intranet), DNS rebind protection off.
-  Host and metadata stay blocked. For a few internal hosts, prefer `allowlist` with
-  `allow_private_dns`.
-- `unrestricted`: everything, including the host. Local debugging only.
-
-Add your own in `profiles.toml`; they override built-ins of the same name:
-
-```toml
-[profiles.rust]
-image = "rust:1-slim"
-cpus = 8
-memory_mib = 8192
-network = "allowlist"
-allowed_domains = [".crates.io", ".static.crates.io"]
-setup_script = "rustup component add clippy"
-
-[profiles.corporate]   # intranet hosts resolve to private IPs
-image = "agent-box"
-network = "allowlist"
-allowed_domains = [".corp.com", ".pypi.org", ".files.pythonhosted.org"]
-allow_private_dns = true   # every allowed domain may now resolve privately
-```
-
-Storage: `named_volumes = { "/home/me" = "my-home" }` is shared by every sandbox naming it;
-`disks = { "/var/lib/docker" = 20480 }` is an ext4 disk (MiB) owned by one sandbox and
-deleted with it.
-
-Config lookup order:
-
-1. `--config` / `-c`
-2. `$AGENTBOX_CONFIG`
-3. `$XDG_CONFIG_HOME/agentbox/profiles.toml` (if absolute)
-4. `~/.config/agentbox/profiles.toml`
-
-agentbox never writes these. A missing default file (3, 4) means built-ins only; a file
-named by 1 or 2 must exist. An invalid file exits 2 with the file and field named.
-
-## Development
+Install the locked development dependencies:
 
 ```bash
 uv sync
-uv run ruff check --fix .
-uv run ruff format .
+```
+
+Run the checks used by CI:
+
+```bash
+uv run ruff check src tests
+uv run ruff format --check src tests
 uv run mypy
-uv run pytest                         # unit tests; no microVM needed
-uv run pytest -m integration          # boots real microVMs
+uv run pytest
 ```
 
-Coverage is enforced at 100% (statements and branches); unit tests use the fakes in
-`tests/fakes.py`. Integration tests skip without a microsandbox runtime.
+`pytest` runs unit tests against the fakes in `tests/fakes.py`, excludes integration tests by default, and enforces 100% statement and branch coverage. Integration tests boot a real microVM and may be skipped when the host lacks a supported microsandbox runtime:
 
-Dependencies are pinned in `pyproject.toml` and locked in `uv.lock`. To bump: `uv lock
---upgrade && uv sync`, then copy the versions back into the `==` pins.
-
-## Layout
-
+```bash
+uv run pytest -m integration
 ```
+
+Dependencies are pinned in `pyproject.toml` and locked in `uv.lock`. To upgrade them, update the lock and sync, then update the direct version pins in `pyproject.toml`:
+
+```bash
+uv lock --upgrade
+uv sync
+```
+
+## Deployment and package builds
+
+This repository has no configured production deployment target. The GitHub Actions workflow runs lint, type checks, tests, and `uv build`; it uploads the built wheel and source distribution as workflow artifacts but does not publish them to a package index. To build locally:
+
+```bash
+uv build
+```
+
+The `agent-box` Docker images are local microsandbox VM images, not a deployment of a hosted service. See [The `agent-box` images](#the-agent-box-images) for build and load commands.
+
+## Project layout
+
+```text
 src/agentbox/
-  config.py                 AgentProfile / WorkspaceMount / NetworkMode — pure data
-  overrides.py              Overrides / SandboxUse: what a command's flags do to a profile
-  microsandbox_adapter.py   profile -> Sandbox.create kwargs; the only SDK-aware module
-  profiles.py               built-in profiles + TOML loading
-  session.py                AgentSession, open_session, launch_detached
-  boxes.py                  existing boxes by name: list, find, stop, destroy
-  commands.py               copy-pasteable `agentbox` / `msb` commands for hints
-  cli.py                    typer entry point: run, up, start, stop, ls, down, profiles, show
-  errors.py                 AgentboxError hierarchy, wrap_errors
-Dockerfile                  the agent-box image, with entrypoint.sh, mise/, start-dockerd.sh,
-                            docker-entrypoint.sh
-tests/
-  fakes.py                  test doubles for the microsandbox SDK
-  conftest.py               fixtures + integration-test gating
+  config.py                 Profile, workspace, network, and validation data
+  overrides.py              How CLI flags change a profile for run/up/show
+  profiles.py               Built-in profiles and TOML configuration loading
+  microsandbox_adapter.py   Translation from profiles to microsandbox SDK objects
+  session.py                VM lifecycle and streamed command execution
+  boxes.py                  Listing, stopping, and deleting named sandboxes
+  commands.py               CLI hints for agentbox and msb commands
+  cli.py                    Typer command-line interface
+  errors.py                 User-facing error types and SDK error wrapping
+  __main__.py               python -m agentbox entry point
+mise/                       Base and optional mise toolchain configurations
+Dockerfile                  Default, PHP, and Docker image targets
+entrypoint.sh               Seed the home volume and install selected mise tools
+start-dockerd.sh            Start Docker Engine inside the Docker image
+docker-entrypoint.sh        Run a command while managing dockerd's lifetime
+tests/                      Unit, CLI, adapter, session, and integration tests
 ```
 
-The SDK is imported lazily, so `version`, `profiles` and `show` start fast.
+The microsandbox SDK is imported lazily for CLI commands that need the runtime, so `agentbox version`, `agentbox profiles`, and `agentbox show` can run without starting a microVM.
 
-## References
+## Troubleshooting
 
-- [microsandbox docs](https://docs.microsandbox.dev)
+- **Runtime or virtualization errors:** run `msb doctor`; on Linux, confirm KVM is available and accessible. On macOS, use Apple Silicon.
+- **`msb` or `agentbox` not found:** ensure `~/.local/bin` is on `PATH`, or use the project environment with `uv run`.
+- **Profile file error:** check TOML syntax and field names. When using a non-default file, pass the same `--config` path used to create the box.
+- **A secret is missing:** set the corresponding host environment variable before boot. The secret value is not stored in the profile.
+- **A stopped box conflicts with current settings:** it keeps the VM configuration it was created with. Use `agentbox down NAME` and create it again to apply new settings; this deletes its box state.
+- **Image not found:** build the image and load it with `msb image load` before starting the corresponding profile.
+- **Docker daemon is unavailable in the Docker image:** use the `agent-box-php-docker` profile or configure its `setup_script` and private `/var/lib/docker` disk in a custom profile. Restart with `agentbox start`, which reruns setup.
+
+## References and license
+
+- [microsandbox documentation](https://docs.microsandbox.dev)
 - [Python SDK reference](https://docs.microsandbox.dev/sdk/python/sandbox)
+- [uv documentation](https://docs.astral.sh/uv/)
+- [mise documentation](https://mise.jdx.dev/)
+- [MIT License](LICENSE)

@@ -16,6 +16,10 @@ named_volumes = { "/home/agent-box" = "agent-box-home" }
 disks = { "/var/lib/docker" = 20480 }
 setup_script = "agent-box-entrypoint agent-box-start-dockerd"
 
+[profiles.dev.workspace]
+host_path = "."
+readonly = false # Explicitly allow the development agent to edit the current project.
+
 # The guest only sees a placeholder. microsandbox swaps in the real key in the Authorization
 # header of requests to openrouter.ai and blocks the placeholder everywhere else.
 secrets = { OPENROUTER_API_KEY = { hosts = ["openrouter.ai"] } }

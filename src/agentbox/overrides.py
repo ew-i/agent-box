@@ -47,10 +47,9 @@ class Overrides:
         updates: dict[str, object] = {}
         if self.workspace is not None:
             # A dict, not a WorkspaceMount: its checks then run in the one validation below.
-            mount: dict[str, object] = {"host_path": self.workspace, "readonly": self.readonly}
+            mount: dict[str, object] = {"host_path": self.workspace}
             if (own := profile.workspace) is not None:
-                # Only the host side changes: the profile's workdir may point at its guest
-                # path, and a read-only profile must not turn writable with another folder.
+                # Only the host side changes: the profile's workdir may point at its guest path.
                 mount["guest_path"] = own.guest_path
                 mount["readonly"] = self.readonly or own.readonly
             updates["workspace"] = mount

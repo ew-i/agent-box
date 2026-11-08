@@ -217,7 +217,7 @@ def test_given_an_unknown_field_when_loading_profiles_then_rejects_it(config_fil
     ],
 )
 def test_given_a_misspelled_key_when_loading_profiles_then_rejects_it(config_file: Path, toml: str, field: str) -> None:
-    """A `read_only` typo would otherwise mount the workspace writable, and `[profile.x]` would vanish."""
+    """Reject misspelled access settings instead of silently ignoring them."""
     config_file.write_text(toml, encoding="utf-8")
 
     with pytest.raises(ProfileConfigError, match=field):
