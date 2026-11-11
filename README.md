@@ -90,7 +90,7 @@ agentbox up agent-box --name my-app --workspace .
 msb exec my-app -- bash -l
 agentbox stop my-app       # keep its state
 agentbox start my-app      # start it again and rerun setup_script
-agentbox down my-app       # delete its state
+agentbox down my-app       # delete its state, keep chat history
 ```
 
 `agentbox up` prints the box name on stdout, so it can be captured by scripts. Hints go to stderr:
@@ -118,13 +118,13 @@ It also provides `stop` and `del` targets (`del` removes the box). By default it
 | `agentbox up PROFILE` | Start a detached, persistent box. Connect with `msb exec`. |
 | `agentbox start NAME` | Restart a stopped `up` box and rerun its profile's `setup_script`. |
 | `agentbox stop NAME` | Stop a box while keeping its state when possible. A default ephemeral `run` box is removed instead. |
-| `agentbox down NAME` | Stop and delete the box and its persistent state. |
+| `agentbox down NAME` | Stop and delete the box and its persistent state, preserving history in shared volumes. |
 | `agentbox ls` | List sandboxes known to the microsandbox runtime. |
 | `agentbox profiles` | List built-in and configured profiles. |
 | `agentbox show PROFILE` | Print the resolved profile as JSON; values in `env` are masked. |
 | `agentbox version` | Print the installed version. |
 
-`run` and `up` accept `--workspace`/`-w`, `--readonly`, `--network`/`-n`, `--idle-timeout`, `--max-duration`, and `--config`/`-c`. A workspace supplied on the command line is read-only by default; write access is configured explicitly in the profile. `run` also accepts `--timeout`, which limits the command itself. `up` also accepts `--name`; names may contain letters, digits, `.`, `_`, and `-`, must start with a letter or digit, and may be at most 128 characters. `show` accepts the same profile overrides and `--for run|up`; `profiles`, `start`, `stop`, and `down` accept `--config`. `stop` and `down` accept `--force` to kill instead of stopping gracefully; `down` also accepts `--keep-history`.
+`run` and `up` accept `--workspace`/`-w`, `--readonly`, `--network`/`-n`, `--idle-timeout`, `--max-duration`, and `--config`/`-c`. A workspace supplied on the command line is read-only by default; write access is configured explicitly in the profile. `run` also accepts `--timeout`, which limits the command itself. `up` also accepts `--name`; names may contain letters, digits, `.`, `_`, and `-`, must start with a letter or digit, and may be at most 128 characters. `show` accepts the same profile overrides and `--for run|up`; `profiles`, `start`, `stop`, and `down` accept `--config`. `stop` and `down` accept `--force` to kill instead of stopping gracefully; `down` preserves history in shared volumes by default (`--keep-history`); use `--no-keep-history` to delete it.
 
 For example, preview the profile after applying flags without booting a sandbox:
 
@@ -265,9 +265,9 @@ For Git over HTTPS, use a fine-grained token supplied as a secret and configure 
 ## Storage and isolation
 
 - **Workspace:** A host directory is mounted at `/workspace` by `--workspace`/`-w`, or at the profile's `workspace.guest_path`. It is read-only by default; set `workspace.readonly = false` in the profile to allow writes. `--readonly` requires a workspace mount and is enforced by the host mount, including against root in the VM.
-- **Named volumes:** Shared between boxes that use the same volume name. The built-in `agent-box` profiles share `agent-box-home`, preserving agent logins and installed mise toolchains across `stop` and `down`. Per-box history such as OpenCode's database is deleted by default on `down` unless `--keep-history` is used.
+- **Named volumes:** Shared between boxes that use the same volume name. The built-in `agent-box` profiles share `agent-box-home`, preserving agent logins and installed mise toolchains across `stop` and `down`. Per-box history such as OpenCode's database is preserved by default on `down`; use `--no-keep-history` to delete it.
 - **Owned disks:** Ext4 disks belong to one box, persist across `stop`/`start`, and are deleted with the box. The Docker image uses one for `/var/lib/docker` because Docker cannot use the VM's overlay filesystem as its data root.
-- **Per-box files:** Put files that should live in a shared volume but remain separate for each box under a path containing `{sandbox}` in an `env` value. The built-in image does this for OpenCode's SQLite database; the name is replaced at boot. `agentbox down` removes these files when it can. `agentbox down NAME --keep-history` preserves them so `agentbox up PROFILE --name NAME` can reuse them. If a box is already stopped, its files cannot be cleaned from inside it and may remain in the volume.
+- **Per-box files:** Put files that should live in a shared volume but remain separate for each box under a path containing `{sandbox}` in an `env` value. The built-in image does this for OpenCode's SQLite database; the name is replaced at boot. `agentbox down NAME --no-keep-history` removes these files when it can. `agentbox down NAME` preserves them by default so `agentbox up PROFILE --name NAME` can reuse them. If a box is already stopped, its files cannot be cleaned from inside it and may remain in the volume.
 
 OpenCode's database is per box because multiple microVMs cannot safely share one SQLite database. OpenCode background services are disabled in the seeded home because multiple boxes share that home and would otherwise stop one another.
 
@@ -286,14 +286,14 @@ Choose the network mode to fit the task; `offline` avoids egress, while `public`
 
 ## The `agent-box` images
 
-The default image is based on Debian 13 and includes Git, curl, CA certificates, ripgrep, `fd-find`, jq, less, nano, htop, vim, sudo, unzip, procps, rsync, and build tools. The `agent-box` user has passwordless sudo inside the VM. Node.js and GitHub CLI are installed via mise, along with Claude Code and OpenCode. More language toolchains are installed on first use into the persistent home volume. Microsandbox named volumes start empty; the image includes a seed home that `agent-box-entrypoint` copies into a new home without overwriting existing files. To build and load the image for microsandbox:
+The default image is based on Debian 13 and includes Git, curl, CA certificates, ripgrep, `fd-find`, jq, less, nano, htop, vim, sudo, unzip, procps, rsync, and build tools. The `agent-box` user has passwordless sudo inside the VM. Node.js and GitHub CLI are installed via mise, along with Claude Code and OpenCode; Codex CLI and Gemini CLI are optional in the Dockerfile. More language toolchains are installed on first use into the persistent home volume. Microsandbox named volumes start empty; the image includes a seed home that `agent-box-entrypoint` copies without overwriting existing files. When the bundled agent launcher set changes, the entrypoint merges missing files from the new seed into an existing home as well, so newly enabled agents appear on the next start without replacing existing installs or logins. To build and load the image for microsandbox:
 
 ```bash
 docker build -t agent-box .
 docker save agent-box | msb image load -t agent-box
 ```
 
-Rebuild and load again after changing `Dockerfile` or `mise/`. Other agent installation lines are commented in the Dockerfile and can be enabled there. Installed agents live under the home volume and can self-update. A newly added agent will not appear in an already seeded home automatically.
+Rebuild and load again after changing `Dockerfile` or `mise/`. Other agent installation lines are commented in the Dockerfile and can be enabled there. Installed agents live under the home volume and can self-update. Newly enabled agents are added to an existing home the next time the VM starts; existing files are never overwritten, and removing an installer from the image does not uninstall that agent from existing homes.
 
 ### Toolchain presets
 
@@ -361,10 +361,12 @@ Docker-in-Docker in an ordinary Docker container requires a privileged container
 | `PHP_VERSION` | `8.5` | PHP image |
 | `COMPOSER_VERSION` | `2` | PHP image |
 | `USER_UID`, `USER_GID` | `1000` | Guest account IDs, useful for matching host file ownership on Linux |
-| `CLAUDE_CODE_VERSION` | `2.1.312` | Default-installed Claude Code |
-| `OPENCODE_VERSION` | `2.2.1` | Default-installed OpenCode |
+| `CLAUDE_CODE_VERSION` | `2.1.322` | Default-installed Claude Code |
+| `OPENCODE_VERSION` | `2.2.7` | Default-installed OpenCode |
+| `CODEX_VERSION` | `0.167.1` | Optional Codex CLI |
+| `GEMINI_CLI_VERSION` | `0.64.0` | Optional Gemini CLI |
 
-Update agents inside a box (`claude update`, `opencode update`). To update base packages or toolchains, change the Dockerfile or `mise/` pins, rebuild, and reload the image. The base Debian packages use a pinned Debian snapshot; bumping the base image digest is part of updating those pins. Rebuilding the image does not overwrite an already seeded home volume.
+Update agents inside a box (`claude update`, `opencode update`, or the agent's own update command). To update base packages or toolchains, change the Dockerfile or `mise/` pins, rebuild, and reload the image. The base Debian packages use a pinned Debian snapshot; bumping the base image digest is part of updating those pins. Rebuilding the image does not overwrite files in an existing home volume; it only adds missing seed files when the bundled agent launcher set changes.
 
 ## Development and tests
 

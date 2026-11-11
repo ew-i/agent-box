@@ -57,11 +57,11 @@ ENV NPM_CONFIG_PREFIX=/home/agent-box/.local \
 # ---- Coding agents: keep the ones you want, comment out the rest ----
 
 # Pinned versions; both self-update at runtime into the home volume.
-ARG CLAUDE_CODE_VERSION=2.1.312
-ARG OPENCODE_VERSION=2.2.1
-ARG CODEX_VERSION=0.166.0
+ARG CLAUDE_CODE_VERSION=2.1.322
+ARG OPENCODE_VERSION=2.2.7
+ARG CODEX_VERSION=0.167.1
 ARG GEMINI_CLI_VERSION=0.64.0
-ARG GITHUB_COPILOT_VERSION=1.0.105
+ARG GITHUB_COPILOT_VERSION=1.0.109
 # One layer for the whole home, so the download caches deleted at the end never
 # reach the image. Bumping any version above reinstalls all of it.
 # Node.js from /etc/mise/config.toml comes first, so the npm-based agents can install.
@@ -88,6 +88,14 @@ RUN for home in "$HOME" /opt/agent-box-home; do \
       mkdir -p "$home/.config/opencode" \
       && printf '{\n  "disabled": true\n}\n' > "$home/.config/opencode/service.json"; \
     done
+
+# Track the image's bundled agent launchers. The entrypoint uses this to add newly
+# enabled agents to an existing home volume without overwriting user-installed versions.
+RUN { for dir in "$HOME/.local/bin" "$HOME/.opencode/bin"; do \
+       if [ -d "$dir" ]; then find "$dir" -mindepth 1 -maxdepth 1 \( -type f -o -type l \) -printf '%p %l\n'; fi; \
+     done; } | sort | sha256sum | cut -d ' ' -f 1 > "$HOME/.agent-box-home-seed-id" \
+  && sudo install -m 0644 "$HOME/.agent-box-home-seed-id" /opt/agent-box-home-seed-id \
+  && rm "$HOME/.agent-box-home-seed-id"
 
 WORKDIR /workspace
 ENTRYPOINT ["agent-box-entrypoint"]

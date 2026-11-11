@@ -756,14 +756,24 @@ def test_given_a_box_from_a_profile_when_tearing_down_then_passes_it_and_hints_w
         return ["/home/agent-box/db-mybox"]
 
     monkeypatch.setattr("agentbox.cli.destroy_sandbox", fake_destroy)
-    result = runner.invoke(main, ["down", "mybox"])
+    result = runner.invoke(main, ["down", "mybox", "--no-keep-history"])
 
     assert result.exit_code == 0
     assert seen[0].name == "agent-box"
     assert "/home/agent-box/db-mybox" in result.stderr
 
 
-def test_given_keep_history_when_tearing_down_then_keeps_the_box_files(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(
+    ("flags", "expected"),
+    [
+        ([], True),
+        (["--keep-history"], True),
+        (["--force"], True),
+        (["--no-keep-history"], False),
+        (["--no-keep-history", "--force"], False),
+    ],
+)
+def test_given_history_options_when_tearing_down_then_handles_the_box_files(monkeypatch: pytest.MonkeyPatch, flags: list[str], expected: bool) -> None:
     kept: list[bool] = []
 
     async def fake_destroy(name: str, *, force: bool = False, profile: Any = None, keep_files: bool = False) -> list[str]:
@@ -771,11 +781,11 @@ def test_given_keep_history_when_tearing_down_then_keeps_the_box_files(monkeypat
         return []
 
     monkeypatch.setattr("agentbox.cli.destroy_sandbox", fake_destroy)
-    result = runner.invoke(main, ["down", "mybox", "--keep-history"])
+    result = runner.invoke(main, ["down", "mybox", *flags])
 
     assert result.exit_code == 0
-    assert kept == [True]
-    assert "up --name mybox" in result.stderr
+    assert kept == [expected]
+    assert ("up --name mybox" in result.stderr) is expected
 
 
 @pytest.mark.parametrize(
@@ -795,7 +805,7 @@ def test_given_a_box_whose_profile_cannot_load_when_tearing_down_then_removes_it
     config = tmp_path / "profiles.toml"
     config.write_text(toml, encoding="utf-8")
     monkeypatch.setattr("agentbox.cli.destroy_sandbox", fake_destroy)
-    result = runner.invoke(main, ["down", "mybox", "-c", str(config)])
+    result = runner.invoke(main, ["down", "mybox", "--no-keep-history", "-c", str(config)])
 
     assert result.exit_code == 0
     assert seen == [None]

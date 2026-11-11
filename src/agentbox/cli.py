@@ -266,7 +266,7 @@ def stop(
     """Stop a sandbox but keep its state; `agentbox start` boots it again.
 
     A `run` box can't keep its state: stopping deletes it, so it is removed like
-    `agentbox down` does, its own files in shared volumes too.
+    `agentbox down --no-keep-history` does, its own files in shared volumes too.
     """
 
     deleted, left = _run(stop_sandbox(name, force=force, profile=_cleanup_profile(name, config)))
@@ -299,14 +299,15 @@ def down(
     keep_history: Annotated[
         bool,
         typer.Option(
-            "--keep-history",
+            "--keep-history/--no-keep-history",
             help="Keep the box's own files in shared volumes (e.g. OpenCode history).",
         ),
-    ] = False,
+    ] = True,
 ) -> None:
-    """Stop a sandbox and delete its persisted state, its own files in shared volumes too.
+    """Stop a sandbox and delete its persisted state, preserving history in shared volumes.
 
-    With `--keep-history` those files stay, so `agentbox up --name NAME` picks them up again.
+    Its own files in shared volumes stay so `agentbox up --name NAME` picks them up again.
+    Use `--no-keep-history` to delete those files too.
     """
 
     left = _run(
