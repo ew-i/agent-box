@@ -1,23 +1,25 @@
 ARG COMPOSER_VERSION=2
-ARG MISE_VERSION=2026.10
+ARG MISE_VERSION=2026.11
 ARG DOCKER_BASE=base
 FROM composer:${COMPOSER_VERSION} AS composer
 FROM jdxcode/mise:${MISE_VERSION} AS mise
 
-FROM debian:trixie@sha256:2dc419c6d7fe3dad0a2f9fd469c34cc90b0f9ba642d8fde837fe3d7d34a0e7f1 AS base
+FROM debian:trixie@sha256:9c6e381421d0f48d1b8133e573f33c185ee16cbf505eda9c4a8a4791b25ea8a6 AS base
+ARG DEBIAN_SNAPSHOT=20261111T000000Z
+ARG NPM_VERSION=12.2.2
 
-# apt packages are pinned to exact versions. Debian's mirrors drop old versions
-# with every update, so apt reads from the snapshot.debian.org date the base
-# image itself names in its sources (bump the digest above to move it). Plain
-# http is fine: apt checks the signatures, and ca-certificates isn't installed yet.
-RUN sed -i -E 's|^# (http://snapshot\.debian\.org/.+)$|URIs: \1\nCheck-Valid-Until: no|; /^URIs: http:\/\/deb\.debian\.org/d' \
+# apt packages are pinned to exact versions and read from this dated Debian
+# snapshot, so rebuilding produces the same package set. Plain HTTP is fine:
+# apt checks signatures, and ca-certificates isn't installed yet.
+RUN sed -i -E "s|(http://snapshot\\.debian\\.org/archive/(debian(-security)?)/)[0-9]+T[0-9]+Z|\\1${DEBIAN_SNAPSHOT}|; s|^# (http://snapshot\\.debian\\.org/.+)$|URIs: \\1\\nCheck-Valid-Until: no|; /^URIs: http:\\/\\/deb\\.debian\\.org/d" \
       /etc/apt/sources.list.d/debian.sources \
  && grep -q '^URIs: http://snapshot' /etc/apt/sources.list.d/debian.sources \
  && apt-get update && apt-get install -y --no-install-recommends \
       git=1:2.47.3-0+deb13u1 curl=8.14.1-2+deb13u7 ca-certificates=20250419+deb13u1 \
       ripgrep=14.1.1-1+b4 fd-find=10.2.0-1+b5 jq=1.7.1-6+deb13u4 less=668-1 nano=8.4-1+deb13u1 \
-      htop=3.4.1-5 vim=2:9.1.1230-2 sudo=1.9.16p2-3+deb13u2 unzip=6.0-29+deb13u1 procps=2:4.0.4-9 \
-      rsync=3.5.0+ds1-0+deb13u1 build-essential=12.12 \
+       htop=3.4.1-5 vim=2:9.1.1230-2+deb13u2 sudo=1.9.16p2-3+deb13u2 unzip=6.0-29+deb13u1 procps=2:4.0.4-9 \
+       rsync=3.5.0+ds1-0+deb13u1 build-essential=12.12 \
+       zlib1g=1:1.3.dfsg+really1.3.1-1+deb13u1 \
     && rm -rf /var/lib/apt/lists/*
 
 # mise: all language toolchains, installed on demand into the home volume
@@ -68,6 +70,7 @@ ARG GITHUB_COPILOT_VERSION=1.0.109
 # A microsandbox named volume starts empty and hides this home, so the last step
 # keeps a copy for the entrypoint to seed a new home volume from.
 RUN mise install \
+ && env -u NPM_CONFIG_PREFIX npm install --global --prefix "$(mise where node)" "npm@$NPM_VERSION" \
 # Claude Code
  && curl -fsSL https://claude.ai/install.sh | bash -s "$CLAUDE_CODE_VERSION" \
 # opencode
@@ -147,8 +150,8 @@ RUN install -m 0755 -d /etc/apt/keyrings \
  && echo "deb [signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian trixie stable" \
       > /etc/apt/sources.list.d/docker.list \
  && apt-get update && apt-get install -y --no-install-recommends \
-      docker-ce=5:29.9.2-1~debian.13~trixie docker-ce-cli=5:29.9.2-1~debian.13~trixie \
-      containerd.io=2.4.2-3~debian.13~trixie docker-compose-plugin=5.6.1-1~debian.13~trixie \
+       docker-ce=5:29.9.3-1~debian.13~trixie docker-ce-cli=5:29.9.3-1~debian.13~trixie \
+       containerd.io=2.4.2-3~debian.13~trixie docker-compose-plugin=5.7.1-1~debian.13~trixie \
       iptables=1.8.11-2 \
  && rm -rf /var/lib/apt/lists/* \
  && usermod -aG docker agent-box

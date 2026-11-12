@@ -1,47 +1,8 @@
 # Findings accepted for now, read by .github/workflows/trivy.yml.
-# Each entry needs a reason and an expiry: once expired_at passes the finding
-# fails the scan again, so it gets looked at instead of ignored forever.
-# purls name the exact version, so an entry stops applying once that package
-# is bumped.
 vulnerabilities:
-  # Fixed in 1.1.0-2+deb13u1, not yet in the snapshot the pinned base image uses.
-  # Goes away with the next debian:trixie digest bump.
-  - id: CVE-2026-111497
-    purls: ["pkg:deb/debian/libbrotli1@1.1.0-2%2Bb7?arch=arm64&distro=debian-13.7", "pkg:deb/debian/libbrotli1@1.1.0-2%2Bb7?arch=amd64&distro=debian-13.7"]
+  # GitHub CLI 2.103.3 and Docker Compose 5.7.1 still bundle x/net 0.60.0;
+  # the dependency fix is 0.62.0, pending upstream binary releases.
+  - id: CVE-2026-78661
+    purls: ["pkg:golang/golang.org/x/net@v0.60.0"]
     expired_at: 2026-12-07
-    statement: waiting for Debian snapshot
-
-  # golang.org/x/net 0.58.0 compiled into docker-compose 5.6.1; needs a new
-  # docker-compose-plugin release from Docker.
-  - id: CVE-2026-78669
-    paths: ["usr/libexec/docker/cli-plugins/docker-compose"]
-    expired_at: 2026-12-07
-    statement: waiting for docker-compose-plugin release
-
-  # Bundled inside the npm that ships with Node 26.12.1; needs a Node release
-  # with a newer npm.
-  - id: CVE-2026-102276
-    purls: ["pkg:npm/brace-expansion@5.0.9"]
-    expired_at: 2026-12-07
-    statement: npm bundled with Node, waiting for Node release
-  - id: CVE-2026-102278
-    purls: ["pkg:npm/brace-expansion@5.0.9"]
-    expired_at: 2026-12-07
-    statement: npm bundled with Node, waiting for Node release
-  - id: CVE-2026-19534
-    purls: ["pkg:npm/undici@6.28.0"]
-    expired_at: 2026-12-07
-    statement: npm bundled with Node, waiting for Node release
-  - id: CVE-2026-109869
-    purls: ["pkg:npm/undici@6.28.0"]
-    expired_at: 2026-12-07
-    statement: npm bundled with Node, waiting for Node release
-  # undici bundled inside npm; even npm 12.2.1 ships 6.29.0, fix needs 6.29.1.
-  - id: CVE-2026-109383
-    purls: ["pkg:npm/undici@6.28.0"]
-    expired_at: 2026-12-07
-    statement: undici bundled with npm, waiting for npm release
-  - id: CVE-2026-87018
-    purls: ["pkg:npm/undici@6.28.0"]
-    expired_at: 2026-12-07
-    statement: undici bundled with npm, waiting for npm release
+    statement: waiting for GitHub CLI and Docker Compose releases
